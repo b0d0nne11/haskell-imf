@@ -2,9 +2,8 @@ module Main where
 
 import           Control.Monad (forever)
 import           System.IO     (BufferMode (..), hSetBuffering, stdout)
-import           Text.Parsec   (parseTest)
 
-import           Text.IMF.Mailbox
+import           Text.IMF
 
 main :: IO ()
 main = do
@@ -12,6 +11,7 @@ main = do
     forever $ do
         putStr "Enter email address: "
         input <- getLine
-        putStr "\n"
-        parseTest mailbox input
+        case parseMessage input :: Either ParseError Mailbox of
+            Left err -> putStrLn $ "Error:\n" ++ show err
+            Right parsed -> putStrLn $ "Parsed: " ++ show parsed
         putStr "\n"
