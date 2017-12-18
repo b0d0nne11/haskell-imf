@@ -3,13 +3,13 @@
 This project is a collection of utilities for parsing and manipulating internet
 messages as defined by [RFC 5322](https://tools.ietf.org/html/rfc5322) and
 related specifications. I started it as a test project to get familiar with
-[Parsec](https://hackage.haskell.org/package/parsec). It only covers mailboxes
-for now but I'd like to expand on it over time.
+[Parsec](https://hackage.haskell.org/package/parsec). So far is covers parsing
+and formatting mailboxes, dates, most headers, message IDs, and full messages.
 
 # License
 
 ```
-Copyright 2017 Brendan O'Donnell
+Copyright 2018 Brendan O'Donnell
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
