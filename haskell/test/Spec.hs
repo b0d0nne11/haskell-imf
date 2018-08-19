@@ -1,6 +1,6 @@
 #!/usr/bin/env stack
 {- stack
-     --resolver lts-9.18
+     --resolver lts-12.11
      --install-ghc
      runghc
      --package :imf-test

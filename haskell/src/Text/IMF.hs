@@ -1,8 +1,7 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Text.IMF
-    ( module Export
-    ) where
+  ( module Export
+  )
+where
 
 import           Text.IMF.DateTime as Export
 import           Text.IMF.Format   as Export

@@ -1,9 +1,8 @@
 name:                imf
-version:             0.2.0
+version:             0.3.0
 synopsis:            Utilities for parsing and manipulating internet messages
--- description:
-homepage:            https://github.com/b0d0nne11/haskell-imf
-bug-reports:         https://github.com/b0d0nne11/haskell-imf/issues
+homepage:            https://github.com/b0d0nne11/imf
+bug-reports:         https://github.com/b0d0nne11/imf/issues
 license:             Apache
 license-file:        LICENSE
 author:              Brendan O'Donnell <brendan.james.odonnell@gmail.com>
@@ -11,13 +10,11 @@ maintainer:          Brendan O'Donnell <brendan.james.odonnell@gmail.com>
 copyright:           2018 Brendan O'Donnell
 category:            Parsing
 build-type:          Simple
-extra-source-files:  README.md CHANGELOG.md
 cabal-version:       >= 1.10
 
 library
-  hs-source-dirs:      src
+  hs-source-dirs:      haskell/src
   exposed-modules:     Text.IMF
-                     , Text.IMF.Combinator
                      , Text.IMF.DateTime
                      , Text.IMF.Header
                      , Text.IMF.Mailbox
@@ -25,23 +22,17 @@ library
                      , Text.IMF.MsgId
                      , Text.IMF.Primatives
                      , Text.IMF.Format
+                     , Text.IMF.FFI
   build-depends:       base >= 4.7 && < 5
                      , parsec
                      , time
-  ghc-options:         -Wall -Werror
-  default-language:    Haskell2010
-
-executable imf-exe
-  hs-source-dirs:      app
-  main-is:             Main.hs
-  build-depends:       base
-                     , imf
-  ghc-options:         -Wall -Werror -threaded -rtsopts -with-rtsopts=-N
+                     , safe
+  ghc-options:
   default-language:    Haskell2010
 
 test-suite imf-test
   type:                exitcode-stdio-1.0
-  hs-source-dirs:      test
+  hs-source-dirs:      haskell/test
   main-is:             Spec.hs
   other-modules:       Text.IMF.HeaderSpec
                      , Text.IMF.MailboxSpec
@@ -50,8 +41,9 @@ test-suite imf-test
                      , imf
                      , hspec
                      , hspec-contrib
-                     , string-qq
-  ghc-options:         -Wall -Werror -threaded -rtsopts -with-rtsopts=-N
+                     , directory
+                     , filepath
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
 source-repository head
