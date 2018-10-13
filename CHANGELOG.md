@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+
+## [0.4.0]
+### Added
+- A network module with sending functionality.
+- Helper functions to get the addr-spec and angle address format of mailboxes.
+
 ## [0.3.0]
 ### Added
 - A foreign function interface and python module.

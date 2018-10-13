@@ -7,6 +7,8 @@ module Text.IMF.Mailbox
   , Local
   , Domain
   , validateDomain
+  , mboxAddrSpec
+  , mboxAngleAddr
   , pMailbox
   , pMailboxList
   , pAddress
@@ -47,7 +49,10 @@ type Domain = String
 validateDomain :: Domain -> Bool
 validateDomain = either (const False) (const True) . parse (pDotAtom <* eof) ""
 
-data Mailbox = Mailbox Display Local Domain
+data Mailbox = Mailbox { mboxDisplay :: Display -- ^ Display name
+                       , mboxLocal   :: Local   -- ^ Local part
+                       , mboxDomain  :: Domain  -- ^ Domain
+                       }
   deriving (Show)
 
 instance Eq Mailbox where
@@ -65,6 +70,14 @@ instance ParseMessage [Mailbox] where
 
 instance FormatMessage [Mailbox] where
     formatMessage = intercalate ", " . map formatMessage
+
+-- | Format the mailbox as an addr-spec (i.e. bob@example.com)
+mboxAddrSpec :: Mailbox -> String
+mboxAddrSpec mbox = formatMessage $ mbox { mboxDisplay = "" }
+
+-- | Format the mailbox as an angle address (i.e. <bob@example.com>)
+mboxAngleAddr :: Mailbox -> String
+mboxAngleAddr mbox = "<" ++ mboxAddrSpec mbox ++ ">"
 
 ------------------------------------------------------------------------------
 -- Addr-Spec Specification <https://tools.ietf.org/html/rfc5322#section-3.4.1>
