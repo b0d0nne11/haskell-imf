@@ -2,7 +2,6 @@
 
 module Text.IMF.NetworkSpec where
 
-import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString.Char8         as C
 import           Control.Concurrent             ( forkIO )
 import           Control.Concurrent.MVar        ( newEmptyMVar
@@ -18,7 +17,6 @@ import           Network.Socket                 ( AddrInfo(..)
                                                 , getAddrInfo
                                                 , socket
                                                 , socketPort
-                                                , connect
                                                 , bind
                                                 , listen
                                                 , accept
@@ -59,23 +57,26 @@ chatTest clientAct serverAct =
         client clientConn sync
   where
     server sock sync = do
-        putMVar sync ()
+        _ <- putMVar sync ()
         _ <- bracket (fst <$> accept sock) close serverAct
-        putMVar sync ()
+        _ <- putMVar sync ()
+        return ()
     client conn sync = do
-        takeMVar sync
+        _ <- takeMVar sync
         _ <- clientAct conn
-        takeMVar sync
+        _ <- takeMVar sync
+        return ()
 
 spec :: Spec
 spec = do
 
     describe "greeting" $
         it "works" $ do
-            let serverAct sock =
-                    Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
+            let serverAct sock = do
+                    _ <- Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
+                    return ()
                 clientAct conn = do
-                    (s, log) <- runChatT greeting conn
+                    (s, chatLog) <- runChatT greeting conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Nothing
@@ -83,17 +84,18 @@ spec = do
                                            , lastRC       = Just 220
                                            , timestamps   = []
                                            }
-                    log `shouldBe` ["220 smtp.example.com ESMTP Postfix"]
+                    chatLog `shouldBe` ["220 smtp.example.com ESMTP Postfix"]
             chatTest clientAct serverAct
 
     describe "helo" $
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
-                    Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
+                    _ <- Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
+                    return ()
                 clientName = "relay.example.com"
                 clientAct conn = do
-                    (s, log) <- runChatT (helo clientName) conn
+                    (s, chatLog) <- runChatT (helo clientName) conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Just "HELO relay.example.com"
@@ -101,19 +103,20 @@ spec = do
                                            , lastRC       = Just 250
                                            , timestamps   = []
                                            }
-                    log `shouldBe` [ "HELO relay.example.com"
-                                   , "250 smtp.example.com, I am glad to meet you"
-                                   ]
+                    chatLog `shouldBe` [ "HELO relay.example.com"
+                                       , "250 smtp.example.com, I am glad to meet you"
+                                       ]
             chatTest clientAct serverAct
 
     describe "mailFrom" $
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.recv sock 4096 `shouldReturn` "MAIL FROM: <bob@example.com>\r\n"
-                    Socket.send sock "250 Ok\r\n"
+                    _ <- Socket.send sock "250 Ok\r\n"
+                    return ()
                 sender = Mailbox "" "bob" "example.com"
                 clientAct conn = do
-                    (s, log) <- runChatT (mailFrom sender) conn
+                    (s, chatLog) <- runChatT (mailFrom sender) conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Just "MAIL FROM: <bob@example.com>"
@@ -121,19 +124,20 @@ spec = do
                                            , lastRC       = Just 250
                                            , timestamps   = []
                                            }
-                    log `shouldBe` [ "MAIL FROM: <bob@example.com>"
-                                   , "250 Ok"
-                                   ]
+                    chatLog `shouldBe` [ "MAIL FROM: <bob@example.com>"
+                                       , "250 Ok"
+                                       ]
             chatTest clientAct serverAct
 
     describe "rcptTo" $
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.recv sock 4096 `shouldReturn` "RCPT TO: <alice@example.com>\r\n"
-                    Socket.send sock "250 Ok\r\n"
+                    _ <- Socket.send sock "250 Ok\r\n"
+                    return ()
                 recipient = Mailbox "" "alice" "example.com"
                 clientAct conn = do
-                    (s, log) <- runChatT (rcptTo recipient) conn
+                    (s, chatLog) <- runChatT (rcptTo recipient) conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Just "RCPT TO: <alice@example.com>"
@@ -141,18 +145,19 @@ spec = do
                                            , lastRC       = Just 250
                                            , timestamps   = []
                                            }
-                    log `shouldBe` [ "RCPT TO: <alice@example.com>"
-                                   , "250 Ok"
-                                   ]
+                    chatLog `shouldBe` [ "RCPT TO: <alice@example.com>"
+                                       , "250 Ok"
+                                       ]
             chatTest clientAct serverAct
 
     describe "dataInit" $
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.recv sock 4096 `shouldReturn` "DATA\r\n"
-                    Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
+                    _ <- Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
+                    return ()
                 clientAct conn = do
-                    (s, log) <- runChatT dataInit conn
+                    (s, chatLog) <- runChatT dataInit conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Just "DATA"
@@ -160,18 +165,19 @@ spec = do
                                            , lastRC       = Just 354
                                            , timestamps   = []
                                            }
-                    log `shouldBe` [ "DATA"
-                                   , "354 End data with <CR><LF>.<CR><LF>"
-                                   ]
+                    chatLog `shouldBe` [ "DATA"
+                                       , "354 End data with <CR><LF>.<CR><LF>"
+                                       ]
             chatTest clientAct serverAct
 
     describe "dataBlock" $
         it "works" $ do
-            let serverAct sock =
-                    Socket.recv sock 4096
+            let serverAct sock = do
+                    _ <- Socket.recv sock 4096
+                    return ()
                 msg = Message (Header []) ""
                 clientAct conn = do
-                    (s, log) <- runChatT (dataBlock msg) conn
+                    (s, chatLog) <- runChatT (dataBlock msg) conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Nothing
@@ -179,16 +185,17 @@ spec = do
                                            , lastRC       = Nothing
                                            , timestamps   = []
                                            }
-                    log `shouldBe` ["__REDACTED__"]
+                    chatLog `shouldBe` ["__REDACTED__"]
             chatTest clientAct serverAct
 
     describe "dataTerm" $
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.recv sock 4096 `shouldReturn` ".\r\n"
-                    Socket.send sock "250 Ok: queued as 12345\r\n"
+                    _ <- Socket.send sock "250 Ok: queued as 12345\r\n"
+                    return ()
                 clientAct conn = do
-                    (s, log) <- runChatT dataTerm conn
+                    (s, chatLog) <- runChatT dataTerm conn
                     s `shouldBe` SendState { mxHostname   = "localhost"
                                            , mxPort       = "25"
                                            , lastCommand  = Just "."
@@ -196,31 +203,32 @@ spec = do
                                            , lastRC       = Just 250
                                            , timestamps   = []
                                            }
-                    log `shouldBe` [ "."
-                                   , "250 Ok: queued as 12345"
-                                   ]
+                    chatLog `shouldBe` [ "."
+                                       , "250 Ok: queued as 12345"
+                                       ]
             chatTest clientAct serverAct
 
     describe "chat" $
         it "works" $ do
             let serverAct sock = do
-                    Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
+                    _ <- Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
-                    Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
+                    _ <- Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "MAIL FROM: <bob@example.com>\r\n"
-                    Socket.send sock "250 Ok\r\n"
+                    _ <- Socket.send sock "250 Ok\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "RCPT TO: <alice@example.com>\r\n"
-                    Socket.send sock "250 Ok\r\n"
+                    _ <- Socket.send sock "250 Ok\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "DATA\r\n"
-                    Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
-                    Socket.recv sock 4096
-                    Socket.send sock "250 Ok: queued as 12345\r\n"
+                    _ <- Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
+                    _ <- Socket.recv sock 4096
+                    _ <- Socket.send sock "250 Ok: queued as 12345\r\n"
+                    return ()
                 clientName = "relay.example.com"
                 sender = Mailbox "" "bob" "example.com"
                 recipient = Mailbox "" "alice" "example.com"
                 msg = Message (Header []) ""
                 clientAct conn = do
-                    (s, log) <- runChatT (chat clientName sender recipient msg) conn
+                    (s, chatLog) <- runChatT (chat clientName sender recipient msg) conn
                     let s' = s { timestamps = [] }
                     s' `shouldBe` SendState { mxHostname   = "localhost"
                                             , mxPort       = "25"
@@ -229,18 +237,18 @@ spec = do
                                             , lastRC       = Just 250
                                             , timestamps   = []
                                             }
-                    log `shouldBe` [ "220 smtp.example.com ESMTP Postfix"
-                                   , "HELO relay.example.com"
-                                   , "250 smtp.example.com, I am glad to meet you"
-                                   , "MAIL FROM: <bob@example.com>"
-                                   , "250 Ok"
-                                   , "RCPT TO: <alice@example.com>"
-                                   , "250 Ok"
-                                   , "DATA"
-                                   , "354 End data with <CR><LF>.<CR><LF>"
-                                   , "__REDACTED__"
-                                   , "."
-                                   , "250 Ok: queued as 12345"
-                                   ]
+                    chatLog `shouldBe` [ "220 smtp.example.com ESMTP Postfix"
+                                       , "HELO relay.example.com"
+                                       , "250 smtp.example.com, I am glad to meet you"
+                                       , "MAIL FROM: <bob@example.com>"
+                                       , "250 Ok"
+                                       , "RCPT TO: <alice@example.com>"
+                                       , "250 Ok"
+                                       , "DATA"
+                                       , "354 End data with <CR><LF>.<CR><LF>"
+                                       , "__REDACTED__"
+                                       , "."
+                                       , "250 Ok: queued as 12345"
+                                       ]
             chatTest clientAct serverAct
 

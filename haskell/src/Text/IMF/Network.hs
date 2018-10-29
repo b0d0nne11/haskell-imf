@@ -61,7 +61,6 @@ import           Network.DNS.Resolver           ( makeResolvSeed
                                                 , Resolver
                                                 )
 import           Network.Socket                 ( AddrInfo(..)
-                                                , AddrInfoFlag(..)
                                                 , SocketType(..)
                                                 , Socket
                                                 , getAddrInfo
@@ -89,9 +88,14 @@ type Hostname = ByteString
 type Port     = ByteString
 type IPv4     = ByteString
 
-responseTimeout   = userError "response timeout"
+responseTimeout :: IOError
+responseTimeout = userError "response timeout"
+
+badResponseFormat :: IOError
 badResponseFormat = userError "bad response format"
-badResponseCode   = userError "bad response code"
+
+badResponseCode :: IOError
+badResponseCode = userError "bad response code"
 
 -- | SMTP connection object
 data Conn = Conn
@@ -144,9 +148,9 @@ robocall :: Resolver           -- ^ dns resolver
 robocall _ es []     = fail $ "failed to connect: " ++ show es
 robocall r es (a:as) = dial r a `catchIOError` \e -> handleError r e es a as
   where
-    handleError r e es a as = do
-        let e' = annotateIOError e (show a) Nothing Nothing
-        robocall r (e':es) as
+    handleError _r _e _es _a _as = do
+        let _e' = annotateIOError _e (show _a) Nothing Nothing
+        robocall _r (_e':_es) _as
 
 -- | Try to open a connection to a hostname and port
 dial :: Resolver         -- ^ dns resolver
@@ -184,7 +188,7 @@ resolveA resolver host = do
 quit :: Conn -> IO ()
 quit conn = do
     let sock = connSocket conn
-    Socket.send sock "QUIT\r\n"
+    _ <- Socket.send sock "QUIT\r\n"
     _ <- timeoutMin 1 $ Socket.recv sock 4096
     close sock
 
@@ -325,7 +329,7 @@ talk ::
     -> m ()
 talk command = do
     sock <- asks connSocket
-    liftError $ Socket.send sock $ C.append command "\r\n"
+    _ <- liftError $ Socket.send sock $ C.append command "\r\n"
     tell [command]
     modify $ \s -> s { lastCommand  = Just command
                      , lastResponse = Nothing
@@ -345,7 +349,7 @@ whisper ::
     -> m ()
 whisper command = do
     sock <- asks connSocket
-    liftError $ Socket.send sock $ C.append command "\r\n"
+    _ <- liftError $ Socket.send sock $ C.append command "\r\n"
     tell ["__REDACTED__"]
     modify $ \s -> s { lastCommand  = Nothing
                      , lastResponse = Nothing
