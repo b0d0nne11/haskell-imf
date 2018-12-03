@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Add support to SMTP client for multiline replies
 - Fixed pedantic errors
 
 ## [0.4.0]

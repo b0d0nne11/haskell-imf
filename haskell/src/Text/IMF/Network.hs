@@ -19,10 +19,14 @@ module Text.IMF.Network
   )
 where
 
-import           Control.Exception              ( bracket
-                                                , try
+import           Prelude                 hiding ( takeWhile )
+
+import           Control.Applicative            ( liftA2
+                                                , liftA3
+                                                , many
+                                                , (<|>)
                                                 )
-import           Control.Monad                  ( when )
+import qualified Control.Exception           as Exception
 import           Control.Monad.Reader           ( MonadReader
                                                 , asks
                                                 )
@@ -45,12 +49,28 @@ import           Control.Monad.Except           ( ExceptT
 import           Control.Monad.Trans            ( MonadIO
                                                 , liftIO
                                                 )
+import           Data.Attoparsec.ByteString     ( Parser
+                                                , IResult(..)
+                                                , Result
+                                                , parse
+                                                , try
+                                                )
+import           Data.Attoparsec.ByteString.Char8 ( satisfy
+                                                  , takeWhile
+                                                  , string
+                                                  )
 import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString.Char8         as C
+import           Data.Char                      ( isDigit
+                                                , isPrint
+                                                )
 import           Data.List                      ( sortOn )
 import           Data.Maybe                     ( fromMaybe )
 import           Data.Time.Clock                ( UTCTime
+                                                , NominalDiffTime
                                                 , getCurrentTime
+                                                , addUTCTime
+                                                , diffUTCTime
                                                 )
 import           Network.DNS.Lookup             ( lookupMX
                                                 , lookupA
@@ -83,10 +103,12 @@ import           Text.IMF.Mailbox               ( Mailbox(..)
 import           Text.IMF.Message               ( Message(..) )
 import           Text.IMF.Format                ( formatMessage )
 
+
 type Domain   = ByteString
 type Hostname = ByteString
 type Port     = ByteString
 type IPv4     = ByteString
+type Reply    = (Int, [ByteString])
 
 responseTimeout :: IOError
 responseTimeout = userError "response timeout"
@@ -107,24 +129,22 @@ data Conn = Conn
 
 -- | State information for the SMTP chat
 data SendState = SendState
-    { mxHostname   :: Hostname            -- ^ mx hostname
-    , mxPort       :: Port                -- ^ mx port
-    , lastCommand  :: Maybe ByteString    -- ^ the last command sent, if any
-    , lastResponse :: Maybe ByteString    -- ^ the response to the last command, if any
-    , lastRC       :: Maybe Int           -- ^ the rc from the last response, if any
-    , timestamps   :: [(String, UTCTime)] -- ^ timestamps
+    { mxHostname  :: Hostname            -- ^ mx hostname
+    , mxPort      :: Port                -- ^ mx port
+    , lastCommand :: Maybe ByteString    -- ^ the last command sent, if any
+    , lastReply   :: Maybe Reply         -- ^ the reply to the last command, if any
+    , timestamps  :: [(String, UTCTime)] -- ^ timestamps
     }
   deriving (Show, Eq)
 
 -- | Initial state information for a new connection
 initState :: Conn -> SendState
 initState conn = SendState
-    { mxHostname   = connHostname conn
-    , mxPort       = connPort conn
-    , lastCommand  = Nothing
-    , lastResponse = Nothing
-    , lastRC       = Nothing
-    , timestamps   = []
+    { mxHostname  = connHostname conn
+    , mxPort      = connPort conn
+    , lastCommand = Nothing
+    , lastReply   = Nothing
+    , timestamps  = []
     }
 
 -- | Default MX ports
@@ -189,7 +209,7 @@ quit :: Conn -> IO ()
 quit conn = do
     let sock = connSocket conn
     _ <- Socket.send sock "QUIT\r\n"
-    _ <- timeoutMin 1 $ Socket.recv sock 4096
+    _ <- timeout 60000000 $ Socket.recv sock 4096
     close sock
 
 -- | The SMTP chat transformer
@@ -235,7 +255,9 @@ greeting ::
     , MonadError IOError m
     )
     => m ()
-greeting = listen 5 >>= checkRC 220
+greeting = do
+    _ <- listen 300 >>= checkRC 220
+    return ()
 
 -- | Send the HELO command
 helo ::
@@ -249,7 +271,8 @@ helo ::
     -> m ()
 helo client = do
     talk $ C.append "HELO " client
-    listen 5 >>= checkRC 250
+    _ <- listen 300 >>= checkRC 250
+    return ()
 
 -- | Send the MAIL FROM command
 mailFrom ::
@@ -263,7 +286,8 @@ mailFrom ::
     -> m ()
 mailFrom mbox = do
     talk $ C.append "MAIL FROM: " $ C.pack $ mboxAngleAddr mbox
-    listen 5 >>= checkRC 250
+    _ <- listen 300 >>= checkRC 250
+    return ()
 
 -- | Send the RCPT TO command
 rcptTo ::
@@ -277,7 +301,8 @@ rcptTo ::
     -> m ()
 rcptTo mbox = do
     talk $ C.append "RCPT TO: " $ C.pack $ mboxAngleAddr mbox
-    listen 5 >>= checkRC 250
+    _ <- listen 300 >>= checkRC 250
+    return ()
 
 -- | Send the DATA command
 dataInit ::
@@ -290,7 +315,8 @@ dataInit ::
     => m ()
 dataInit = do
     talk "DATA"
-    listen 2 >>= checkRC 354
+    _ <- listen 120 >>= checkRC 354
+    return ()
 
 -- | Send the data block
 dataBlock ::
@@ -315,7 +341,8 @@ dataTerm ::
     => m ()
 dataTerm = do
     talk "."
-    listen 10 >>= checkRC 250
+    _ <- listen 600 >>= checkRC 250
+    return ()
 
 -- | Send and log the command
 talk ::
@@ -331,9 +358,8 @@ talk command = do
     sock <- asks connSocket
     _ <- liftError $ Socket.send sock $ C.append command "\r\n"
     tell [command]
-    modify $ \s -> s { lastCommand  = Just command
-                     , lastResponse = Nothing
-                     , lastRC       = Nothing
+    modify $ \s -> s { lastCommand = Just command
+                     , lastReply   = Nothing
                      }
     return ()
 
@@ -351,13 +377,12 @@ whisper command = do
     sock <- asks connSocket
     _ <- liftError $ Socket.send sock $ C.append command "\r\n"
     tell ["__REDACTED__"]
-    modify $ \s -> s { lastCommand  = Nothing
-                     , lastResponse = Nothing
-                     , lastRC       = Nothing
+    modify $ \s -> s { lastCommand = Nothing
+                     , lastReply   = Nothing
                      }
     return ()
 
--- | Listen for a server response and log it
+-- | Listen for a server reply and log it
 listen ::
     ( MonadIO m
     , MonadReader Conn m
@@ -365,33 +390,30 @@ listen ::
     , MonadState SendState m
     , MonadError IOError m
     )
-    => Int -- ^ response timeout in minutes
-    -> m ByteString
-listen minutes = do
-    sock <- asks connSocket
-    resp <- liftError $ timeoutMin minutes $ Socket.recv sock 4096
-    tell [stripCRLF $ fromMaybe "" resp]
-    modify $ \s -> s { lastResponse = resp }
-    maybe (throwError responseTimeout) return resp
+    => NominalDiffTime -- ^ reply timeout
+    -> m Reply
+listen secs = do
+    deadline <- liftError $ addUTCTime secs <$> getCurrentTime
+    listen' (timeoutAt deadline) (parse pReply)
+  where
+    listen' timeoutF parseF = do
+        sock <- asks connSocket
+        resp <- liftError $ timeoutF $ Socket.recv sock 1024
+        tell [stripCRLF $ fromMaybe "" resp]
+        case resp of
+            Nothing -> throwError responseTimeout
+            Just a  -> case parseF a of
+                Fail{}          -> throwError badResponseFormat
+                Partial parseF' -> listen' timeoutF parseF'
+                Done _ reply    -> do
+                    modify $ \s -> s { lastReply = Just reply }
+                    return reply
 
--- | Check and log the response code
-checkRC ::
-    ( MonadIO m
-    , MonadReader Conn m
-    , MonadWriter [ByteString] m
-    , MonadState SendState m
-    , MonadError IOError m
-    )
-    => Int        -- ^ expected response code
-    -> ByteString -- ^ response
-    -> m ()
-checkRC expected msg =
-    -- TODO: replace this with an actual parser
-    case fst <$> C.readInt (C.take 3 msg) of
-        Nothing -> throwError badResponseFormat
-        Just rc -> do
-            modify $ \s -> s { lastRC = Just rc }
-            when (rc /= expected) $ throwError badResponseCode
+-- | Check and log the reply code
+checkRC :: (MonadIO m, MonadError IOError m) => Int -> Reply -> m Reply
+checkRC expected reply@(rcode, _)
+    | rcode == expected = return reply
+    | otherwise         = throwError badResponseCode
 
 -- | Add a timestamp to the chat state object
 timestamp ::
@@ -411,16 +433,39 @@ timestamp tag = do
 
 -- | Lift an IO action into the Error monad
 liftError :: (MonadIO m, MonadError IOError m) => IO a -> m a
-liftError f = liftEither =<< liftIO (try f)
+liftError f = liftIO (Exception.try f) >>= liftEither
 
--- | A version of timeout that takes a number of minutes rather than
--- microseconds because the mandatory SMTP wait times are absurdly long
-timeoutMin :: Int -> IO a -> IO (Maybe a)
-timeoutMin = timeout . (60*1000000*)
+-- | Timeout in a certain number of seconds
+timeoutIn :: NominalDiffTime -> IO a -> IO (Maybe a)
+timeoutIn secs f
+    | secs <= 0 = return Nothing
+    | otherwise = timeout (ceiling $ 1000000 * secs) f
+
+-- | Timeout at a certain time
+timeoutAt :: UTCTime -> IO a -> IO (Maybe a)
+timeoutAt deadline f = do
+    secs <- diffUTCTime deadline <$> getCurrentTime
+    timeoutIn secs f
 
 -- | Strip the CRLF line ending off of a bytestring
 stripCRLF :: ByteString -> ByteString
 stripCRLF msg = fromMaybe msg $ C.stripSuffix "\r\n" msg
+
+-- | Parser for SMTP reply
+pReply :: Parser Reply
+pReply =
+    liftA2 (,) pCode (pEmptyLine <|> pSingleLine <|> pMultiLine)
+  where
+    pFirstDigit = satisfy $ \c -> c >= '2' && c <= '5'
+    pDigit = satisfy isDigit
+    pCode = read <$> sequence [pFirstDigit, pDigit, pDigit]
+    pText = takeWhile $ \c -> isPrint c || c == '\t'
+    pEmptyLine = [] <$ string "\r\n"
+    pSingleLine = pure <$> (string " " *> pText <* string "\r\n")
+    pMultiLine = liftA3 (\a b c -> [a] ++ b ++ [c])
+                        (string "-" *> pText <* string "\r\n")
+                        (many $ try $ pCode *> string "-" *> pText <* string "\r\n")
+                        (pCode *> string " " *> pText <* string "\r\n")
 
 -- | Send a message
 --
@@ -450,7 +495,7 @@ send :: Domain  -- ^ client name
      -> Message -- ^ message
      -> IO (SendState, [ByteString])
 send client sender recipient msg =
-    bracket (open (C.pack $ mboxDomain recipient) defaultPorts)
-            (tryIOError . quit)
-            (runChatT $ chat client sender recipient msg)
+    Exception.bracket (open (C.pack $ mboxDomain recipient) defaultPorts)
+                      (tryIOError . quit)
+                      (runChatT $ chat client sender recipient msg)
 

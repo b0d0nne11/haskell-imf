@@ -77,12 +77,11 @@ spec = do
                     return ()
                 clientAct conn = do
                     (s, chatLog) <- runChatT greeting conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Nothing
-                                           , lastResponse = Just "220 smtp.example.com ESMTP Postfix\r\n"
-                                           , lastRC       = Just 220
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Nothing
+                                           , lastReply   = Just (220, ["smtp.example.com ESMTP Postfix"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` ["220 smtp.example.com ESMTP Postfix"]
             chatTest clientAct serverAct
@@ -96,12 +95,11 @@ spec = do
                 clientName = "relay.example.com"
                 clientAct conn = do
                     (s, chatLog) <- runChatT (helo clientName) conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Just "HELO relay.example.com"
-                                           , lastResponse = Just "250 smtp.example.com, I am glad to meet you\r\n"
-                                           , lastRC       = Just 250
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "HELO relay.example.com"
+                                           , lastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` [ "HELO relay.example.com"
                                        , "250 smtp.example.com, I am glad to meet you"
@@ -117,12 +115,11 @@ spec = do
                 sender = Mailbox "" "bob" "example.com"
                 clientAct conn = do
                     (s, chatLog) <- runChatT (mailFrom sender) conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Just "MAIL FROM: <bob@example.com>"
-                                           , lastResponse = Just "250 Ok\r\n"
-                                           , lastRC       = Just 250
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "MAIL FROM: <bob@example.com>"
+                                           , lastReply   = Just (250, ["Ok"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` [ "MAIL FROM: <bob@example.com>"
                                        , "250 Ok"
@@ -138,12 +135,11 @@ spec = do
                 recipient = Mailbox "" "alice" "example.com"
                 clientAct conn = do
                     (s, chatLog) <- runChatT (rcptTo recipient) conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Just "RCPT TO: <alice@example.com>"
-                                           , lastResponse = Just "250 Ok\r\n"
-                                           , lastRC       = Just 250
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "RCPT TO: <alice@example.com>"
+                                           , lastReply   = Just (250, ["Ok"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` [ "RCPT TO: <alice@example.com>"
                                        , "250 Ok"
@@ -158,12 +154,11 @@ spec = do
                     return ()
                 clientAct conn = do
                     (s, chatLog) <- runChatT dataInit conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Just "DATA"
-                                           , lastResponse = Just "354 End data with <CR><LF>.<CR><LF>\r\n"
-                                           , lastRC       = Just 354
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "DATA"
+                                           , lastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` [ "DATA"
                                        , "354 End data with <CR><LF>.<CR><LF>"
@@ -178,12 +173,11 @@ spec = do
                 msg = Message (Header []) ""
                 clientAct conn = do
                     (s, chatLog) <- runChatT (dataBlock msg) conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Nothing
-                                           , lastResponse = Nothing
-                                           , lastRC       = Nothing
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Nothing
+                                           , lastReply   = Nothing
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` ["__REDACTED__"]
             chatTest clientAct serverAct
@@ -196,15 +190,33 @@ spec = do
                     return ()
                 clientAct conn = do
                     (s, chatLog) <- runChatT dataTerm conn
-                    s `shouldBe` SendState { mxHostname   = "localhost"
-                                           , mxPort       = "25"
-                                           , lastCommand  = Just "."
-                                           , lastResponse = Just "250 Ok: queued as 12345\r\n"
-                                           , lastRC       = Just 250
-                                           , timestamps   = []
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "."
+                                           , lastReply   = Just (250, ["Ok: queued as 12345"])
+                                           , timestamps  = []
                                            }
                     chatLog `shouldBe` [ "."
                                        , "250 Ok: queued as 12345"
+                                       ]
+            chatTest clientAct serverAct
+
+    describe "multiline replies" $
+        it "works" $ do
+            let serverAct sock = do
+                    _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
+                    _ <- Socket.send sock "250-this is\r\n250-a\r\n250 multiline reply\r\n"
+                    return ()
+                clientAct conn = do
+                    (s, chatLog) <- runChatT (helo "relay.example.com") conn
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "HELO relay.example.com"
+                                           , lastReply   = Just (250, ["this is", "a", "multiline reply"])
+                                           , timestamps  = []
+                                           }
+                    chatLog `shouldBe` [ "HELO relay.example.com"
+                                       , "250-this is\r\n250-a\r\n250 multiline reply"
                                        ]
             chatTest clientAct serverAct
 
@@ -230,12 +242,11 @@ spec = do
                 clientAct conn = do
                     (s, chatLog) <- runChatT (chat clientName sender recipient msg) conn
                     let s' = s { timestamps = [] }
-                    s' `shouldBe` SendState { mxHostname   = "localhost"
-                                            , mxPort       = "25"
-                                            , lastCommand  = Just "."
-                                            , lastResponse = Just "250 Ok: queued as 12345\r\n"
-                                            , lastRC       = Just 250
-                                            , timestamps   = []
+                    s' `shouldBe` SendState { mxHostname  = "localhost"
+                                            , mxPort      = "25"
+                                            , lastCommand = Just "."
+                                            , lastReply   = Just (250, ["Ok: queued as 12345"])
+                                            , timestamps  = []
                                             }
                     chatLog `shouldBe` [ "220 smtp.example.com ESMTP Postfix"
                                        , "HELO relay.example.com"
