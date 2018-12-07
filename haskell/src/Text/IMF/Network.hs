@@ -19,14 +19,7 @@ module Text.IMF.Network
   )
 where
 
-import           Prelude                 hiding ( takeWhile )
-
-import           Control.Applicative            ( liftA2
-                                                , liftA3
-                                                , many
-                                                , (<|>)
-                                                )
-import qualified Control.Exception           as Exception
+import           Control.Exception              ( bracket )
 import           Control.Monad.Reader           ( MonadReader
                                                 , asks
                                                 )
@@ -49,21 +42,11 @@ import           Control.Monad.Except           ( ExceptT
 import           Control.Monad.Trans            ( MonadIO
                                                 , liftIO
                                                 )
-import           Data.Attoparsec.ByteString     ( Parser
-                                                , IResult(..)
-                                                , Result
+import           Data.Attoparsec.ByteString     ( IResult(..)
                                                 , parse
-                                                , try
                                                 )
-import           Data.Attoparsec.ByteString.Char8 ( satisfy
-                                                  , takeWhile
-                                                  , string
-                                                  )
 import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString.Char8         as C
-import           Data.Char                      ( isDigit
-                                                , isPrint
-                                                )
 import           Data.List                      ( sortOn )
 import           Data.Maybe                     ( fromMaybe )
 import           Data.Time.Clock                ( UTCTime
@@ -102,6 +85,7 @@ import           Text.IMF.Mailbox               ( Mailbox(..)
                                                 )
 import           Text.IMF.Message               ( Message(..) )
 import           Text.IMF.Format                ( formatMessage )
+import           Text.IMF.Parsers.Client        ( pReply )
 
 
 type Domain   = ByteString
@@ -433,7 +417,7 @@ timestamp tag = do
 
 -- | Lift an IO action into the Error monad
 liftError :: (MonadIO m, MonadError IOError m) => IO a -> m a
-liftError f = liftIO (Exception.try f) >>= liftEither
+liftError f = liftIO (tryIOError f) >>= liftEither
 
 -- | Timeout in a certain number of seconds
 timeoutIn :: NominalDiffTime -> IO a -> IO (Maybe a)
@@ -450,22 +434,6 @@ timeoutAt deadline f = do
 -- | Strip the CRLF line ending off of a bytestring
 stripCRLF :: ByteString -> ByteString
 stripCRLF msg = fromMaybe msg $ C.stripSuffix "\r\n" msg
-
--- | Parser for SMTP reply
-pReply :: Parser Reply
-pReply =
-    liftA2 (,) pCode (pEmptyLine <|> pSingleLine <|> pMultiLine)
-  where
-    pFirstDigit = satisfy $ \c -> c >= '2' && c <= '5'
-    pDigit = satisfy isDigit
-    pCode = read <$> sequence [pFirstDigit, pDigit, pDigit]
-    pText = takeWhile $ \c -> isPrint c || c == '\t'
-    pEmptyLine = [] <$ string "\r\n"
-    pSingleLine = pure <$> (string " " *> pText <* string "\r\n")
-    pMultiLine = liftA3 (\a b c -> [a] ++ b ++ [c])
-                        (string "-" *> pText <* string "\r\n")
-                        (many $ try $ pCode *> string "-" *> pText <* string "\r\n")
-                        (pCode *> string " " *> pText <* string "\r\n")
 
 -- | Send a message
 --
@@ -495,7 +463,7 @@ send :: Domain  -- ^ client name
      -> Message -- ^ message
      -> IO (SendState, [ByteString])
 send client sender recipient msg =
-    Exception.bracket (open (C.pack $ mboxDomain recipient) defaultPorts)
-                      (tryIOError . quit)
-                      (runChatT $ chat client sender recipient msg)
+    bracket (open (C.pack $ mboxDomain recipient) defaultPorts)
+            (tryIOError . quit)
+            (runChatT $ chat client sender recipient msg)
 

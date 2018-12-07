@@ -24,6 +24,7 @@ library
                      , Text.IMF.Format
                      , Text.IMF.FFI
                      , Text.IMF.Network
+                     , Text.IMF.Parsers.Client
   build-depends:       base >= 4.7 && < 5
                      , parsec
                      , time
