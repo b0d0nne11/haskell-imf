@@ -49,7 +49,6 @@ import           Data.Attoparsec.ByteString     ( IResult(..)
 import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString.Char8         as C
 import           Data.List                      ( sortOn )
-import           Data.Maybe                     ( fromMaybe )
 import           Data.Time.Clock                ( UTCTime
                                                 , NominalDiffTime
                                                 , getCurrentTime
@@ -373,12 +372,14 @@ talk ::
     -> m ()
 talk command = do
     sock <- asks connSocket
-    _ <- liftError $ Socket.send sock $ C.append command "\r\n"
-    tell [command]
-    modify $ \s -> s { lastCommand = Just command
+    _ <- liftError $ Socket.send sock msg
+    tell [msg]
+    modify $ \s -> s { lastCommand = Just msg
                      , lastReply   = Nothing
                      }
     return ()
+  where
+    msg = C.append command "\r\n"
 
 -- Send the command and log a "__REDACTED__" string
 whisper ::
@@ -392,12 +393,14 @@ whisper ::
     -> m ()
 whisper command = do
     sock <- asks connSocket
-    _ <- liftError $ Socket.send sock $ C.append command "\r\n"
-    tell ["__REDACTED__"]
+    _ <- liftError $ Socket.send sock msg
+    tell [" ... \r\n"]
     modify $ \s -> s { lastCommand = Nothing
                      , lastReply   = Nothing
                      }
     return ()
+  where
+    msg = C.append command "\r\n"
 
 -- | Listen for a server reply and log it
 listen ::
@@ -416,7 +419,7 @@ listen secs = do
     listen' timeoutF parseF = do
         sock <- asks connSocket
         resp <- liftError $ timeoutF $ Socket.recv sock 1024
-        tell [stripCRLF $ fromMaybe "" resp]
+        maybe (return ()) (tell . pure) resp
         case resp of
             Nothing -> throwError responseTimeout
             Just a  -> case parseF a of
@@ -480,10 +483,6 @@ timeoutAt :: UTCTime -> IO a -> IO (Maybe a)
 timeoutAt deadline f = do
     secs <- diffUTCTime deadline <$> getCurrentTime
     timeoutIn secs f
-
--- | Strip the CRLF line ending off of a bytestring
-stripCRLF :: ByteString -> ByteString
-stripCRLF msg = fromMaybe msg $ C.stripSuffix "\r\n" msg
 
 -- | Send a message
 --

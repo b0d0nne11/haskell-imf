@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Stopped modifying line endings in SMTP chat log entries
 - Add extention list to SMTP client state
 - Add support to SMTP client for ELHO with fallback to HELO
 - Add support to SMTP client for multiline replies

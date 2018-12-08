@@ -84,7 +84,7 @@ spec = do
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` ["220 smtp.example.com ESMTP Postfix"]
+                    chatLog `shouldBe` ["220 smtp.example.com ESMTP Postfix\r\n"]
             chatTest clientAct serverAct
 
     describe "hello (ehlo)" $
@@ -98,13 +98,13 @@ spec = do
                     (s, chatLog) <- runChatT (hello clientName) conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "EHLO relay.example.com"
+                                           , lastCommand = Just "EHLO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
                                            , timestamps  = []
                                            , extentions  = [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
                                            }
-                    chatLog `shouldBe` [ "EHLO relay.example.com"
-                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP"
+                    chatLog `shouldBe` [ "EHLO relay.example.com\r\n"
+                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -121,15 +121,15 @@ spec = do
                     (s, chatLog) <- runChatT (hello clientName) conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "HELO relay.example.com"
+                                           , lastCommand = Just "HELO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "EHLO relay.example.com"
-                                       , "502 Command not implemented"
-                                       , "HELO relay.example.com"
-                                       , "250 smtp.example.com, I am glad to meet you"
+                    chatLog `shouldBe` [ "EHLO relay.example.com\r\n"
+                                       , "502 Command not implemented\r\n"
+                                       , "HELO relay.example.com\r\n"
+                                       , "250 smtp.example.com, I am glad to meet you\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -144,13 +144,13 @@ spec = do
                     (s, chatLog) <- runChatT (mailFrom sender) conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "MAIL FROM: <bob@example.com>"
+                                           , lastCommand = Just "MAIL FROM: <bob@example.com>\r\n"
                                            , lastReply   = Just (250, ["Ok"])
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "MAIL FROM: <bob@example.com>"
-                                       , "250 Ok"
+                    chatLog `shouldBe` [ "MAIL FROM: <bob@example.com>\r\n"
+                                       , "250 Ok\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -165,13 +165,13 @@ spec = do
                     (s, chatLog) <- runChatT (rcptTo recipient) conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "RCPT TO: <alice@example.com>"
+                                           , lastCommand = Just "RCPT TO: <alice@example.com>\r\n"
                                            , lastReply   = Just (250, ["Ok"])
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "RCPT TO: <alice@example.com>"
-                                       , "250 Ok"
+                    chatLog `shouldBe` [ "RCPT TO: <alice@example.com>\r\n"
+                                       , "250 Ok\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -185,13 +185,13 @@ spec = do
                     (s, chatLog) <- runChatT dataInit conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "DATA"
+                                           , lastCommand = Just "DATA\r\n"
                                            , lastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "DATA"
-                                       , "354 End data with <CR><LF>.<CR><LF>"
+                    chatLog `shouldBe` [ "DATA\r\n"
+                                       , "354 End data with <CR><LF>.<CR><LF>\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -210,7 +210,7 @@ spec = do
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` ["__REDACTED__"]
+                    chatLog `shouldBe` [" ... \r\n"]
             chatTest clientAct serverAct
 
     describe "dataTerm" $
@@ -223,13 +223,13 @@ spec = do
                     (s, chatLog) <- runChatT dataTerm conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
-                                           , lastCommand = Just "."
+                                           , lastCommand = Just ".\r\n"
                                            , lastReply   = Just (250, ["Ok: queued as 12345"])
                                            , timestamps  = []
                                            , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "."
-                                       , "250 Ok: queued as 12345"
+                    chatLog `shouldBe` [ ".\r\n"
+                                       , "250 Ok: queued as 12345\r\n"
                                        ]
             chatTest clientAct serverAct
 
@@ -257,23 +257,23 @@ spec = do
                     let s' = s { timestamps = [] }
                     s' `shouldBe` SendState { mxHostname  = "localhost"
                                             , mxPort      = "25"
-                                            , lastCommand = Just "."
+                                            , lastCommand = Just ".\r\n"
                                             , lastReply   = Just (250, ["Ok: queued as 12345"])
                                             , timestamps  = []
                                             , extentions  = [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
                                             }
-                    chatLog `shouldBe` [ "220 smtp.example.com ESMTP Postfix"
-                                       , "EHLO relay.example.com"
-                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP"
-                                       , "MAIL FROM: <bob@example.com>"
-                                       , "250 Ok"
-                                       , "RCPT TO: <alice@example.com>"
-                                       , "250 Ok"
-                                       , "DATA"
-                                       , "354 End data with <CR><LF>.<CR><LF>"
-                                       , "__REDACTED__"
-                                       , "."
-                                       , "250 Ok: queued as 12345"
+                    chatLog `shouldBe` [ "220 smtp.example.com ESMTP Postfix\r\n"
+                                       , "EHLO relay.example.com\r\n"
+                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
+                                       , "MAIL FROM: <bob@example.com>\r\n"
+                                       , "250 Ok\r\n"
+                                       , "RCPT TO: <alice@example.com>\r\n"
+                                       , "250 Ok\r\n"
+                                       , "DATA\r\n"
+                                       , "354 End data with <CR><LF>.<CR><LF>\r\n"
+                                       , " ... \r\n"
+                                       , ".\r\n"
+                                       , "250 Ok: queued as 12345\r\n"
                                        ]
             chatTest clientAct serverAct
 
