@@ -82,26 +82,53 @@ spec = do
                                            , lastCommand = Nothing
                                            , lastReply   = Just (220, ["smtp.example.com ESMTP Postfix"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` ["220 smtp.example.com ESMTP Postfix"]
             chatTest clientAct serverAct
 
-    describe "helo" $
+    describe "hello (ehlo)" $
         it "works" $ do
             let serverAct sock = do
+                    _ <- Socket.recv sock 4096 `shouldReturn` "EHLO relay.example.com\r\n"
+                    _ <- Socket.send sock "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
+                    return ()
+                clientName = "relay.example.com"
+                clientAct conn = do
+                    (s, chatLog) <- runChatT (hello clientName) conn
+                    s `shouldBe` SendState { mxHostname  = "localhost"
+                                           , mxPort      = "25"
+                                           , lastCommand = Just "EHLO relay.example.com"
+                                           , lastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
+                                           , timestamps  = []
+                                           , extentions  = [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
+                                           }
+                    chatLog `shouldBe` [ "EHLO relay.example.com"
+                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP"
+                                       ]
+            chatTest clientAct serverAct
+
+    describe "hello (helo)" $
+        it "works" $ do
+            let serverAct sock = do
+                    _ <- Socket.recv sock 4096 `shouldReturn` "EHLO relay.example.com\r\n"
+                    _ <- Socket.send sock "502 Command not implemented\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
                     _ <- Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
                     return ()
                 clientName = "relay.example.com"
                 clientAct conn = do
-                    (s, chatLog) <- runChatT (helo clientName) conn
+                    (s, chatLog) <- runChatT (hello clientName) conn
                     s `shouldBe` SendState { mxHostname  = "localhost"
                                            , mxPort      = "25"
                                            , lastCommand = Just "HELO relay.example.com"
                                            , lastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
-                    chatLog `shouldBe` [ "HELO relay.example.com"
+                    chatLog `shouldBe` [ "EHLO relay.example.com"
+                                       , "502 Command not implemented"
+                                       , "HELO relay.example.com"
                                        , "250 smtp.example.com, I am glad to meet you"
                                        ]
             chatTest clientAct serverAct
@@ -120,6 +147,7 @@ spec = do
                                            , lastCommand = Just "MAIL FROM: <bob@example.com>"
                                            , lastReply   = Just (250, ["Ok"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` [ "MAIL FROM: <bob@example.com>"
                                        , "250 Ok"
@@ -140,6 +168,7 @@ spec = do
                                            , lastCommand = Just "RCPT TO: <alice@example.com>"
                                            , lastReply   = Just (250, ["Ok"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` [ "RCPT TO: <alice@example.com>"
                                        , "250 Ok"
@@ -159,6 +188,7 @@ spec = do
                                            , lastCommand = Just "DATA"
                                            , lastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` [ "DATA"
                                        , "354 End data with <CR><LF>.<CR><LF>"
@@ -178,6 +208,7 @@ spec = do
                                            , lastCommand = Nothing
                                            , lastReply   = Nothing
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` ["__REDACTED__"]
             chatTest clientAct serverAct
@@ -195,28 +226,10 @@ spec = do
                                            , lastCommand = Just "."
                                            , lastReply   = Just (250, ["Ok: queued as 12345"])
                                            , timestamps  = []
+                                           , extentions  = []
                                            }
                     chatLog `shouldBe` [ "."
                                        , "250 Ok: queued as 12345"
-                                       ]
-            chatTest clientAct serverAct
-
-    describe "multiline replies" $
-        it "works" $ do
-            let serverAct sock = do
-                    _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
-                    _ <- Socket.send sock "250-this is\r\n250-a\r\n250 multiline reply\r\n"
-                    return ()
-                clientAct conn = do
-                    (s, chatLog) <- runChatT (helo "relay.example.com") conn
-                    s `shouldBe` SendState { mxHostname  = "localhost"
-                                           , mxPort      = "25"
-                                           , lastCommand = Just "HELO relay.example.com"
-                                           , lastReply   = Just (250, ["this is", "a", "multiline reply"])
-                                           , timestamps  = []
-                                           }
-                    chatLog `shouldBe` [ "HELO relay.example.com"
-                                       , "250-this is\r\n250-a\r\n250 multiline reply"
                                        ]
             chatTest clientAct serverAct
 
@@ -224,8 +237,8 @@ spec = do
         it "works" $ do
             let serverAct sock = do
                     _ <- Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
-                    _ <- Socket.recv sock 4096 `shouldReturn` "HELO relay.example.com\r\n"
-                    _ <- Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
+                    _ <- Socket.recv sock 4096 `shouldReturn` "EHLO relay.example.com\r\n"
+                    _ <- Socket.send sock "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "MAIL FROM: <bob@example.com>\r\n"
                     _ <- Socket.send sock "250 Ok\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "RCPT TO: <alice@example.com>\r\n"
@@ -247,10 +260,11 @@ spec = do
                                             , lastCommand = Just "."
                                             , lastReply   = Just (250, ["Ok: queued as 12345"])
                                             , timestamps  = []
+                                            , extentions  = [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
                                             }
                     chatLog `shouldBe` [ "220 smtp.example.com ESMTP Postfix"
-                                       , "HELO relay.example.com"
-                                       , "250 smtp.example.com, I am glad to meet you"
+                                       , "EHLO relay.example.com"
+                                       , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP"
                                        , "MAIL FROM: <bob@example.com>"
                                        , "250 Ok"
                                        , "RCPT TO: <alice@example.com>"

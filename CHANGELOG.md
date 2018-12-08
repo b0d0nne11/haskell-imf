@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Add extention list to SMTP client state
+- Add support to SMTP client for ELHO with fallback to HELO
 - Add support to SMTP client for multiline replies
 - Fixed pedantic errors
 

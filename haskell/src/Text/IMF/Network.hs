@@ -10,7 +10,7 @@ module Text.IMF.Network
   , runChatT
   , chat
   , greeting
-  , helo
+  , hello
   , mailFrom
   , rcptTo
   , dataInit
@@ -37,6 +37,7 @@ import           Control.Monad.Except           ( ExceptT
                                                 , MonadError
                                                 , runExceptT
                                                 , throwError
+                                                , catchError
                                                 , liftEither
                                                 )
 import           Control.Monad.Trans            ( MonadIO
@@ -73,6 +74,9 @@ import           Network.Socket                 ( AddrInfo(..)
                                                 , close
                                                 )
 import qualified Network.Socket.ByteString     as Socket
+import           Safe                           ( headDef
+                                                , tailSafe
+                                                )
 import           System.IO.Error                ( tryIOError
                                                 , catchIOError
                                                 , annotateIOError
@@ -113,11 +117,12 @@ data Conn = Conn
 
 -- | State information for the SMTP chat
 data SendState = SendState
-    { mxHostname  :: Hostname            -- ^ mx hostname
-    , mxPort      :: Port                -- ^ mx port
-    , lastCommand :: Maybe ByteString    -- ^ the last command sent, if any
-    , lastReply   :: Maybe Reply         -- ^ the reply to the last command, if any
-    , timestamps  :: [(String, UTCTime)] -- ^ timestamps
+    { mxHostname  :: Hostname             -- ^ mx hostname
+    , mxPort      :: Port                 -- ^ mx port
+    , lastCommand :: Maybe ByteString     -- ^ the last command sent, if any
+    , lastReply   :: Maybe Reply          -- ^ the reply to the last command, if any
+    , timestamps  :: [(String, UTCTime)]  -- ^ timestamps
+    , extentions  :: [(String, [String])] -- ^ supported extentions
     }
   deriving (Show, Eq)
 
@@ -129,6 +134,7 @@ initState conn = SendState
     , lastCommand = Nothing
     , lastReply   = Nothing
     , timestamps  = []
+    , extentions  = []
     }
 
 -- | Default MX ports
@@ -222,7 +228,7 @@ chat ::
 chat client sender recipient msg = do
     timestamp "opening chat"
     greeting
-    helo client
+    hello client
     mailFrom sender
     rcptTo recipient
     dataInit
@@ -257,6 +263,33 @@ helo client = do
     talk $ C.append "HELO " client
     _ <- listen 300 >>= checkRC 250
     return ()
+
+-- | Send the EHLO command
+ehlo ::
+    ( MonadIO m
+    , MonadReader Conn m
+    , MonadWriter [ByteString] m
+    , MonadState SendState m
+    , MonadError IOError m
+    )
+    => ByteString -- ^ client name
+    -> m ()
+ehlo client = do
+    talk $ C.append "EHLO " client
+    r <- listen 300 >>= checkRC 250
+    saveExtentions r
+    return ()
+
+hello ::
+    ( MonadIO m
+    , MonadReader Conn m
+    , MonadWriter [ByteString] m
+    , MonadState SendState m
+    , MonadError IOError m
+    )
+    => ByteString -- ^ client name
+    -> m ()
+hello client = ehlo client `catchError` \_ -> helo client
 
 -- | Send the MAIL FROM command
 mailFrom ::
@@ -398,6 +431,23 @@ checkRC :: (MonadIO m, MonadError IOError m) => Int -> Reply -> m Reply
 checkRC expected reply@(rcode, _)
     | rcode == expected = return reply
     | otherwise         = throwError badResponseCode
+
+-- | Add supported extentions to the chat state object
+saveExtentions ::
+    ( MonadIO m
+    , MonadReader Conn m
+    , MonadWriter [ByteString] m
+    , MonadState SendState m
+    , MonadError IOError m
+    )
+    => Reply
+    -> m ()
+saveExtentions (_, rtext) = do
+    let es = map (split . words . C.unpack) $ drop 1 rtext
+    modify $ \s -> s { extentions = es }
+    return ()
+  where
+    split as = (headDef "" as, tailSafe as)
 
 -- | Add a timestamp to the chat state object
 timestamp ::
