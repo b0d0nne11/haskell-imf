@@ -5,11 +5,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
-### Changed
-- Stopped modifying line endings in SMTP chat log entries
+### Added
+- Add support to SMTP client for STARTTLS
 - Add extention list to SMTP client state
 - Add support to SMTP client for ELHO with fallback to HELO
 - Add support to SMTP client for multiline replies
+### Changed
+- Stopped modifying line endings in SMTP chat log entries
 - Fixed pedantic errors
 
 ## [0.4.0]

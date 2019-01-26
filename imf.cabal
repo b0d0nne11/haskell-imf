@@ -23,17 +23,20 @@ library
                      , Text.IMF.Primatives
                      , Text.IMF.Format
                      , Text.IMF.FFI
-                     , Text.IMF.Network
                      , Text.IMF.Parsers.Client
+                     , Text.IMF.Network.Client
+                     , Text.IMF.Network.Connection
   build-depends:       base >= 4.7 && < 5
                      , parsec
                      , time
                      , safe
                      , network
+                     , tls
                      , dns
                      , bytestring
                      , mtl
                      , attoparsec
+                     , data-default-class
   ghc-options:
   default-language:    Haskell2010
 
@@ -52,7 +55,9 @@ test-suite imf-test
                      , directory
                      , filepath
                      , network
+                     , tls
                      , bytestring
+                     , data-default-class
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
