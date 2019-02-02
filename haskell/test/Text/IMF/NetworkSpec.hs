@@ -47,11 +47,18 @@ getTestRequest = do
     msg <- LB.readFile "haskell/test/Fixtures/Messages/simple_addressing_1.txt"
     return $ Request
         { reqClientName = "relay.example.com"
+        , reqTLS = Just $ TLSParams
+            { tlsRequired = False
+            , tlsValidate = False
+            }
+        , reqAuth = Just $ AuthParams
+            { authRequired = False
+            , authUsername = "username"
+            , authPassword = "password"
+            }
         , reqSender = Mailbox "" "jdoe" "localhost"
         , reqRecipient = Mailbox "" "mary" "localhost"
         , reqMessage = msg
-        , reqTLS = False
-        , reqTLSValidation = False
         }
 
 getServerSocket :: IO Socket
@@ -86,6 +93,7 @@ chatTest clientAct serverAct =
         _ <- takeMVar sync
         return ()
 
+{-# ANN spec ("HLint: ignore Reduce duplication" :: String) #-}
 spec :: Spec
 spec = do
 
@@ -117,7 +125,7 @@ spec = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> disconnect) req def
                     s `shouldBe` ChatState { connection  = Nothing
-                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
+                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
                                            , lastCommand = Just "EHLO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
                                            , timestamps  = []
@@ -175,7 +183,7 @@ spec = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> startTLS >> disconnect) req def
                     s `shouldBe` ChatState { connection  = Nothing
-                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("STARTTLS",[])]
+                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("starttls",[])]
                                            , lastCommand = Just "EHLO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com", "STARTTLS"])
                                            , timestamps  = []
@@ -188,6 +196,102 @@ spec = do
                                                          , "[...]\r\n"
                                                          , "EHLO relay.example.com\r\n"
                                                          , "250-smtp.example.com\r\n250 STARTTLS\r\n"
+                                                         ]
+            chatTest clientAct serverAct
+
+    describe "auth (login)" $
+        it "works" $ do
+            let serverAct sock = do
+                    _ <- Socket.recv sock 4096 `shouldReturn` "EHLO relay.example.com\r\n"
+                    _ <- Socket.send sock "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                    _ <- Socket.recv sock 4096 `shouldReturn` "STARTTLS\r\n"
+                    _ <- Socket.send sock "220 Go ahead\r\n"
+                    creds <- TLS.credentialLoadX509 "haskell/test/Fixtures/localhost.crt" "haskell/test/Fixtures/localhost.key" >>= either fail return
+                    let tlsParams = def { TLS.serverDHEParams = Just TLS.ffdhe4096
+                                        , TLS.serverShared = def { TLS.sharedCredentials = TLS.Credentials [creds] }
+                                        , TLS.serverSupported = def { TLS.supportedCiphers = TLS.ciphersuite_strong }
+                                        }
+                    ctx <- TLS.contextNew sock tlsParams
+                    _ <- TLS.handshake ctx
+                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com"
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "AUTH LOGIN"
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "334 VXNlcm5hbWU6\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "dXNlcm5hbWU="
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "334 UGFzc3dvcmQ6\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "cGFzc3dvcmQ="
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
+                    return ()
+                clientAct = do
+                    req <- getTestRequest
+                    (s, chatLog) <- runChat (connect >> hello >> startTLS >> auth >> disconnect) req def
+                    s `shouldBe` ChatState { connection  = Nothing
+                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["login"])]
+                                           , lastCommand = Nothing
+                                           , lastReply   = Just (235, ["Authentication successful."])
+                                           , timestamps  = []
+                                           , err         = Nothing
+                                           }
+                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                                                         , "STARTTLS\r\n"
+                                                         , "220 Go ahead\r\n"
+                                                         , "[...]\r\n"
+                                                         , "EHLO relay.example.com\r\n"
+                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                                                         , "AUTH LOGIN\r\n"
+                                                         , "334 VXNlcm5hbWU6\r\n"
+                                                         , "[...]\r\n"
+                                                         , "334 UGFzc3dvcmQ6\r\n"
+                                                         , "[...]\r\n"
+                                                         , "235 Authentication successful.\r\n"
+                                                         ]
+            chatTest clientAct serverAct
+
+    describe "auth (plain)" $
+        it "works" $ do
+            let serverAct sock = do
+                    _ <- Socket.recv sock 4096 `shouldReturn` "EHLO relay.example.com\r\n"
+                    _ <- Socket.send sock "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                    _ <- Socket.recv sock 4096 `shouldReturn` "STARTTLS\r\n"
+                    _ <- Socket.send sock "220 Go ahead\r\n"
+                    creds <- TLS.credentialLoadX509 "haskell/test/Fixtures/localhost.crt" "haskell/test/Fixtures/localhost.key" >>= either fail return
+                    let tlsParams = def { TLS.serverDHEParams = Just TLS.ffdhe4096
+                                        , TLS.serverShared = def { TLS.sharedCredentials = TLS.Credentials [creds] }
+                                        , TLS.serverSupported = def { TLS.supportedCiphers = TLS.ciphersuite_strong }
+                                        }
+                    ctx <- TLS.contextNew sock tlsParams
+                    _ <- TLS.handshake ctx
+                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com"
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ="
+                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
+                    return ()
+                clientAct = do
+                    req <- getTestRequest
+                    (s, chatLog) <- runChat (connect >> hello >> startTLS >> auth >> disconnect) req def
+                    s `shouldBe` ChatState { connection  = Nothing
+                                           , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["plain"])]
+                                           , lastCommand = Nothing
+                                           , lastReply   = Just (235, ["Authentication successful."])
+                                           , timestamps  = []
+                                           , err         = Nothing
+                                           }
+                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                                                         , "STARTTLS\r\n"
+                                                         , "220 Go ahead\r\n"
+                                                         , "[...]\r\n"
+                                                         , "EHLO relay.example.com\r\n"
+                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                                                         , "[...]\r\n"
+                                                         , "235 Authentication successful.\r\n"
                                                          ]
             chatTest clientAct serverAct
 
@@ -337,7 +441,7 @@ spec = do
                     (s, chatLog) <- deliver req
                     let s' = s { timestamps = [] }
                     s' `shouldBe` ChatState { connection  = Nothing
-                                            , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("SIZE",["14680064"]),("PIPELINING",[]),("HELP",[])]
+                                            , mxServer    = Just $ MX "localhost" "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
                                             , lastCommand = Just "QUIT\r\n"
                                             , lastReply   = Just (221, ["Bye"])
                                             , timestamps  = []

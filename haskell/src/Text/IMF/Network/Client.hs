@@ -3,6 +3,8 @@
 
 module Text.IMF.Network.Client
   ( Request(..)
+  , TLSParams(..)
+  , AuthParams(..)
   , ChatLog
   , MX(..)
   , ChatState(..)
@@ -12,6 +14,7 @@ module Text.IMF.Network.Client
   , greeting
   , hello
   , startTLS
+  , auth
   , mailFrom
   , rcptTo
   , dataInit
@@ -26,6 +29,7 @@ import           Control.Applicative            ( (<|>)
                                                 , empty
                                                 )
 import           Control.Exception              ( bracket )
+import           Control.Monad                  ( unless )
 import           Control.Monad.Reader           ( MonadReader
                                                 , asks
                                                 )
@@ -56,6 +60,8 @@ import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString               as B
 import qualified Data.ByteString.Char8         as C
 import qualified Data.ByteString.Lazy          as LB
+import qualified Data.ByteString.Base64        as B64
+import           Data.Char                      ( toLower )
 import           Data.Default.Class             ( Default
                                                 , def
                                                 )
@@ -117,15 +123,43 @@ badResponseCode = userError "bad response code"
 tlsNotSupported :: IOError
 tlsNotSupported = userError "tls not supported"
 
+authNotSupported :: IOError
+authNotSupported = userError "authentication not supported"
+
+authMethodNotSupported :: IOError
+authMethodNotSupported = userError "authentication method not supported"
+
+authNotEncrypted :: IOError
+authNotEncrypted = userError "unencrypted authentication not supported"
+
+-- | Opportunistic TLS parameters
+data TLSParams = TLSParams
+    { tlsRequired :: Bool -- ^ require TLS?
+    , tlsValidate :: Bool -- ^ validate certificate?
+    }
+  deriving (Show, Eq)
+
+-- | Authentication parameters
+data AuthParams = AuthParams
+    { authRequired :: Bool   -- ^ require authentication?
+    , authUsername :: String -- ^ username
+    , authPassword :: String -- ^ password
+    }
+  deriving (Show, Eq)
+
 -- | Request parameters
 data Request = Request
-    { reqClientName    :: ByteString    -- ^ client name
-    , reqSender        :: Mailbox       -- ^ sender
-    , reqRecipient     :: Mailbox       -- ^ recipient
-    , reqMessage       :: LB.ByteString -- ^ message
-    , reqTLS           :: Bool          -- ^ is TLS required?
-    , reqTLSValidation :: Bool          -- ^ is TLS certificate validation required?
+    { reqClientName    :: ByteString       -- ^ client name
+    , reqTLS           :: Maybe TLSParams  -- ^ opportunistic TLS
+    , reqAuth          :: Maybe AuthParams -- ^ authentication
+    , reqSender        :: Mailbox          -- ^ sender
+    , reqRecipient     :: Mailbox          -- ^ recipient
+    , reqMessage       :: LB.ByteString    -- ^ message
     }
+  deriving (Show, Eq)
+
+-- | SMTP chat log
+type ChatLog = [ByteString]
 
 -- | Mail exchange server details
 data MX = MX
@@ -136,9 +170,6 @@ data MX = MX
     , mxExtentions :: [(String, [String])] -- ^ a list of supported extensions and parameters
     }
   deriving (Show, Eq)
-
--- | SMTP chat log
-type ChatLog = [ByteString]
 
 -- | SMTP chat state
 data ChatState = ChatState
@@ -187,6 +218,7 @@ deliver req = runChat chat req def
         greeting
         hello
         startTLS
+        auth
         mailFrom
         rcptTo
         dataInit
@@ -274,26 +306,52 @@ hello = ehlo `catchError` const helo
 -- | Send the STARTTLS command and negotiate TLS context
 startTLS :: ChatM ()
 startTLS = do
-    tlsEnabled <- Connection.isTLS . fromJust <$> gets connection
-    tlsSupported <- isJust . lookup "STARTTLS" . mxExtentions . fromJust <$> gets mxServer
-    tlsRequired <- asks reqTLS
-    case () of
-        _ | tlsEnabled -> return ()
-        _ | tlsSupported -> do
+    conn <- fromJust <$> gets connection
+    tlsServerParams <- lookup "starttls" . mxExtentions . fromJust <$> gets mxServer
+    tlsParams <- asks reqTLS
+    case (tlsParams, tlsServerParams) of
+        (Nothing, _) -> return ()
+        (Just (TLSParams _ isValidated), Just _) -> do
             -- issue command and wait for response
             talk "STARTTLS"
             _ <- listen 120 >>= checkRC 220
             -- negotiate TLS context
-            conn <- fromJust <$> gets connection
             hostname <- mxHostname . fromJust <$> gets mxServer
-            reqValidation <- asks reqTLSValidation
-            conn' <- liftError $ Connection.negotiateTLS conn hostname reqValidation
+            conn' <- liftError $ Connection.negotiateTLS conn hostname isValidated
             tell ["[...]\r\n"]
             modify $ \s -> s { connection = Just conn' }
             -- test TLS context by re-issuing hello
             hello
-        _ | tlsRequired -> throwError tlsNotSupported
-        _ -> return ()
+        (Just (TLSParams isRequired _), Nothing)
+            | isRequired -> throwError tlsNotSupported
+            | otherwise  -> return ()
+
+auth :: ChatM ()
+auth = do
+    conn <- fromJust <$> gets connection
+    authServerParams <- lookup "auth" . mxExtentions . fromJust <$> gets mxServer
+    authParams <- asks reqAuth
+    case (authParams, authServerParams) of
+        (Nothing, _) -> return ()
+        (Just (AuthParams _ user pass), Just methods)
+            | "login" `elem` methods -> do
+                unless (Connection.isTLS conn) $ throwError authNotEncrypted
+                talk "AUTH LOGIN"
+                _ <- listen 120 >>= checkRC 334
+                whisper $ LB.fromStrict $ B64.encode $ C.pack user
+                _ <- listen 120 >>= checkRC 334
+                whisper $ LB.fromStrict $ B64.encode $ C.pack pass
+                _ <- listen 120 >>= checkRC 235
+                return ()
+            | "plain" `elem` methods -> do
+                unless (Connection.isTLS conn) $ throwError authNotEncrypted
+                whisper $ LB.fromStrict $ B.append "AUTH PLAIN " $ B64.encode $ B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]
+                _ <- listen 120 >>= checkRC 235
+                return ()
+            | otherwise -> throwError authMethodNotSupported
+        (Just (AuthParams isRequired _ _), Nothing)
+            | isRequired -> throwError authNotSupported
+            | otherwise  -> return ()
 
 -- | Send the MAIL FROM command
 mailFrom :: ChatM ()
@@ -407,7 +465,7 @@ checkRC expected reply@(rcode, _)
 saveExtentions :: (Int, [ByteString]) -- ^ reply
                -> ChatM ()
 saveExtentions (_, rtext) = do
-    let es = map (split . words . C.unpack) $ drop 1 rtext
+    let es = map (split . words . map toLower . C.unpack) $ drop 1 rtext
     mxServer <- fromJust <$> gets mxServer
     modify $ \s -> s { mxServer = Just $ mxServer { mxExtentions = es } }
     return ()

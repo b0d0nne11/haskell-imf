@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 ### Added
+- Add support to SMTP client for AUTH PLAIN/LOGIN
 - Add support to SMTP client for STARTTLS
 - Add extention list to SMTP client state
 - Add support to SMTP client for ELHO with fallback to HELO
