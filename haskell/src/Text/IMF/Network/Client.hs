@@ -28,7 +28,9 @@ where
 import           Control.Applicative            ( (<|>)
                                                 , empty
                                                 )
-import           Control.Exception              ( bracket )
+import           Control.Exception              ( catch
+                                                , throwIO
+                                                )
 import           Control.Monad                  ( unless )
 import           Control.Monad.Reader           ( MonadReader
                                                 , asks
@@ -44,15 +46,12 @@ import           Control.Monad.RWS              ( RWST
                                                 , execRWST
                                                 )
 import           Control.Monad.Except           ( ExceptT
-                                                , MonadError
                                                 , runExceptT
                                                 , throwError
                                                 , catchError
                                                 , liftEither
                                                 )
-import           Control.Monad.Trans            ( MonadIO
-                                                , liftIO
-                                                )
+import           Control.Monad.Trans            ( liftIO )
 import           Data.Attoparsec.ByteString     ( IResult(..)
                                                 , parse
                                                 )
@@ -66,9 +65,7 @@ import           Data.Default.Class             ( Default
                                                 , def
                                                 )
 import           Data.List                      ( sortOn )
-import           Data.Maybe                     ( isJust
-                                                , fromJust
-                                                )
+import           Data.Maybe                     ( fromJust )
 import           Data.Time.Clock                ( UTCTime
                                                 , NominalDiffTime
                                                 , getCurrentTime
@@ -78,17 +75,13 @@ import           Data.Time.Clock                ( UTCTime
 import           Network.DNS.Lookup             ( lookupMX
                                                 , lookupA
                                                 )
-import           Network.DNS.Resolver           ( makeResolvSeed
+import           Network.DNS.Resolver           ( Resolver
+                                                , makeResolvSeed
                                                 , withResolver
                                                 , defaultResolvConf
-                                                , Resolver
                                                 )
 import           Safe                           ( headDef
                                                 , tailSafe
-                                                )
-import           System.IO.Error                ( tryIOError
-                                                , catchIOError
-                                                , annotateIOError
                                                 )
 import           System.Timeout                 ( timeout )
 
@@ -96,41 +89,11 @@ import           System.Timeout                 ( timeout )
 import           Text.IMF.Mailbox               ( Mailbox(..)
                                                 , mboxAngleAddr
                                                 )
-import           Text.IMF.Message               ( Message(..) )
 import           Text.IMF.Format                ( formatMessage )
 import           Text.IMF.Parsers.Client        ( pReply )
 import qualified Text.IMF.Network.Connection   as Connection
 import           Text.IMF.Network.Connection    ( Connection )
-
-mxLookupFailed :: IOError
-mxLookupFailed = userError "MX lookup failed"
-
-aLookupFailed :: IOError
-aLookupFailed = userError "A lookup failed"
-
-aLookupNotFound :: IOError
-aLookupNotFound = userError "A record not found"
-
-responseTimeout :: IOError
-responseTimeout = userError "response timeout"
-
-badResponseFormat :: IOError
-badResponseFormat = userError "bad response format"
-
-badResponseCode :: IOError
-badResponseCode = userError "bad response code"
-
-tlsNotSupported :: IOError
-tlsNotSupported = userError "tls not supported"
-
-authNotSupported :: IOError
-authNotSupported = userError "authentication not supported"
-
-authMethodNotSupported :: IOError
-authMethodNotSupported = userError "authentication method not supported"
-
-authNotEncrypted :: IOError
-authNotEncrypted = userError "unencrypted authentication not supported"
+import           Text.IMF.Network.Errors        ( ClientException(..) )
 
 -- | Opportunistic TLS parameters
 data TLSParams = TLSParams
@@ -150,6 +113,7 @@ data AuthParams = AuthParams
 -- | Request parameters
 data Request = Request
     { reqClientName    :: ByteString       -- ^ client name
+    , reqMailRelay     :: Maybe String     -- ^ mail relay
     , reqTLS           :: Maybe TLSParams  -- ^ opportunistic TLS
     , reqAuth          :: Maybe AuthParams -- ^ authentication
     , reqSender        :: Mailbox          -- ^ sender
@@ -163,8 +127,7 @@ type ChatLog = [ByteString]
 
 -- | Mail exchange server details
 data MX = MX
-    { mxDomain     :: String               -- ^ domain
-    , mxHostname   :: String               -- ^ hostname
+    { mxHostname   :: String               -- ^ hostname
     , mxIP         :: String               -- ^ ip address
     , mxPort       :: String               -- ^ port
     , mxExtentions :: [(String, [String])] -- ^ a list of supported extensions and parameters
@@ -178,7 +141,7 @@ data ChatState = ChatState
     , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
     , lastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
     , timestamps  :: [(String, UTCTime)]       -- ^ timestamps
-    , err         :: Maybe IOError             -- ^ any error encountered
+    , errors      :: [ClientException]         -- ^ any errors encountered
     }
   deriving (Show, Eq)
 
@@ -189,7 +152,7 @@ instance Default ChatState where
         , lastCommand = Nothing
         , lastReply   = Nothing
         , timestamps  = []
-        , err         = Nothing
+        , errors      = []
         }
 
 -- | Deliver a message
@@ -229,7 +192,7 @@ deliver req = runChat chat req def
         timestamp "closing chat"
 
 -- | SMTP chat monad
-type ChatM = ExceptT IOError (RWST Request ChatLog ChatState IO)
+type ChatM = ExceptT [ClientException] (RWST Request ChatLog ChatState IO)
 
 -- | Unwrap a SMTP chat monad into an IO action
 runChat :: ChatM ()   -- ^ chat monad
@@ -238,48 +201,50 @@ runChat :: ChatM ()   -- ^ chat monad
         -> IO (ChatState, ChatLog)
 runChat f = execRWST (runExceptT $ f `catchError` handleError)
   where
-    handleError e = modify $ \s -> s { err = Just e }
+    handleError es = modify $ \s -> s { errors = es }
 
 -- | Lookup and connect to the MX server
 connect :: ChatM ()
 connect = do
+    relay <- asks reqMailRelay
     domain <- mboxDomain <$> asks reqRecipient
-    resolvSeed <- liftError $ makeResolvSeed defaultResolvConf
-    (conn, mxServer) <- liftError $ withResolver resolvSeed $ dial domain
-    modify $ \s -> s { connection = Just conn, mxServer = Just mxServer }
-    return ()
+    hosts <- maybe (liftChat $ resolveMX domain) (return . pure) relay
+    foldl (<|>) empty $ with hosts $ \host ->
+        foldl (<|>) empty $ with ports $ \port -> do
+            ip <- liftChat $ resolveA host
+            conn <- liftChat $ Connection.open ip port
+            modify $ \s -> s { connection = Just conn
+                             , mxServer = Just $ MX host ip port []
+                             }
+            return ()
   where
-    with = flip map
     ports = ["25", "587", "2525"]
-    dial :: String -> Resolver -> IO (Connection, MX)
-    dial domain resolv = do
-        hosts <- resolveMX resolv domain
-        foldl (<|>) empty $ with hosts $ \host ->
-            foldl (<|>) empty $ with ports $ \port -> do
-                ip <- resolveA resolv host
-                conn <- Connection.open ip port
-                return (conn, MX domain host ip port [])
-    resolveMX :: Resolver -> String -> IO [String]
-    resolveMX _ "localhost" = return ["localhost"]
-    resolveMX resolv domain = do
-        records <- lookupMX resolv $ C.pack domain
-        case records of
-            Left _   -> ioError mxLookupFailed
-            Right [] -> return [domain] -- return implicit record
-            Right rs -> return $ map (C.unpack . fst) $ sortOn snd rs
-    resolveA :: Resolver -> String -> IO String
-    resolveA _ "localhost" = return "127.0.0.1"
-    resolveA resolv host = do
-        records <- lookupA resolv $ C.pack host
-        case records of
-            Left _      -> ioError aLookupFailed
-            Right []    -> ioError aLookupNotFound
-            Right (r:_) -> return $ show r
+    with = flip map
+    resolveMX :: String -> IO [String]
+    resolveMX "localhost" = return ["localhost"]
+    resolveMX domain = do
+        rs <- makeResolvSeed defaultResolvConf
+        withResolver rs $ \resolver -> do
+            records <- lookupMX resolver $ C.pack domain
+            case records of
+                Left _   -> throwIO DNSLookupFailed
+                Right [] -> return [domain] -- return implicit record
+                Right rs -> return $ map (C.unpack . fst) $ sortOn snd rs
+    resolveA :: String -> IO String
+    resolveA "localhost" = return "127.0.0.1"
+    resolveA host = do
+        rs <- makeResolvSeed defaultResolvConf
+        withResolver rs $ \resolver -> do
+            records <- lookupA resolver $ C.pack host
+            case records of
+                Left _      -> throwIO DNSLookupFailed
+                Right []    -> throwIO DNSLookupNotFound
+                Right (r:_) -> return $ show r
 
  -- | Verify the server greeting
 greeting :: ChatM ()
 greeting = do
-    _ <- listen 300 >>= checkRC 220
+    _ <- listen 300
     return ()
 
 -- | Send the HELO command
@@ -287,7 +252,7 @@ helo :: ChatM ()
 helo = do
     clientName <- asks reqClientName
     talk $ LB.fromStrict $ B.append "HELO " clientName
-    _ <- listen 300 >>= checkRC 250
+    _ <- listen 300
     return ()
 
 -- | Send the EHLO command
@@ -295,7 +260,7 @@ ehlo :: ChatM ()
 ehlo = do
     clientName <- asks reqClientName
     talk $ LB.fromStrict $ B.append "EHLO " clientName
-    r <- listen 300 >>= checkRC 250
+    r <- listen 300
     saveExtentions r
     return ()
 
@@ -314,16 +279,16 @@ startTLS = do
         (Just (TLSParams _ isValidated), Just _) -> do
             -- issue command and wait for response
             talk "STARTTLS"
-            _ <- listen 120 >>= checkRC 220
+            _ <- listen 120
             -- negotiate TLS context
             hostname <- mxHostname . fromJust <$> gets mxServer
-            conn' <- liftError $ Connection.negotiateTLS conn hostname isValidated
+            conn' <- liftChat $ Connection.negotiateTLS conn hostname isValidated
             tell ["[...]\r\n"]
             modify $ \s -> s { connection = Just conn' }
             -- test TLS context by re-issuing hello
             hello
         (Just (TLSParams isRequired _), Nothing)
-            | isRequired -> throwError tlsNotSupported
+            | isRequired -> throwError [TLSNotSupported]
             | otherwise  -> return ()
 
 auth :: ChatM ()
@@ -335,22 +300,22 @@ auth = do
         (Nothing, _) -> return ()
         (Just (AuthParams _ user pass), Just methods)
             | "login" `elem` methods -> do
-                unless (Connection.isTLS conn) $ throwError authNotEncrypted
+                unless (Connection.isTLS conn) $ throwError [AuthNotEncrypted]
                 talk "AUTH LOGIN"
-                _ <- listen 120 >>= checkRC 334
+                _ <- listen 120
                 whisper $ LB.fromStrict $ B64.encode $ C.pack user
-                _ <- listen 120 >>= checkRC 334
+                _ <- listen 120
                 whisper $ LB.fromStrict $ B64.encode $ C.pack pass
-                _ <- listen 120 >>= checkRC 235
+                _ <- listen 120
                 return ()
             | "plain" `elem` methods -> do
-                unless (Connection.isTLS conn) $ throwError authNotEncrypted
+                unless (Connection.isTLS conn) $ throwError [AuthNotEncrypted]
                 whisper $ LB.fromStrict $ B.append "AUTH PLAIN " $ B64.encode $ B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]
-                _ <- listen 120 >>= checkRC 235
+                _ <- listen 120
                 return ()
-            | otherwise -> throwError authMethodNotSupported
+            | otherwise -> throwError [AuthMethodNotSupported]
         (Just (AuthParams isRequired _ _), Nothing)
-            | isRequired -> throwError authNotSupported
+            | isRequired -> throwError [AuthNotSupported]
             | otherwise  -> return ()
 
 -- | Send the MAIL FROM command
@@ -358,7 +323,7 @@ mailFrom :: ChatM ()
 mailFrom = do
     sender <- asks reqSender
     talk $ LB.fromStrict $ B.append "MAIL FROM: " $ C.pack $ mboxAngleAddr sender
-    _ <- listen 300 >>= checkRC 250
+    _ <- listen 300
     return ()
 
 -- | Send the RCPT TO command
@@ -366,14 +331,14 @@ rcptTo :: ChatM ()
 rcptTo = do
     recipient <- asks reqRecipient
     talk $ LB.fromStrict $ B.append "RCPT TO: " $ C.pack $ mboxAngleAddr recipient
-    _ <- listen 300 >>= checkRC 250
+    _ <- listen 300
     return ()
 
 -- | Send the DATA command
 dataInit :: ChatM ()
 dataInit = do
     talk "DATA"
-    _ <- listen 120 >>= checkRC 354
+    _ <- listen 120
     return ()
 
 -- | Send the data block
@@ -387,21 +352,21 @@ dataBlock = do
 dataTerm :: ChatM ()
 dataTerm = do
     talk "."
-    _ <- listen 600 >>= checkRC 250
+    _ <- listen 600
     return ()
 
 -- | Send the QUIT command
 quit :: ChatM ()
 quit = do
     talk "QUIT"
-    _ <- listen 120 >>= checkRC 221
+    _ <- listen 120
     return ()
 
 -- | Close the connection to the MX server
 disconnect :: ChatM ()
 disconnect = do
     conn <- fromJust <$> gets connection
-    liftError $ Connection.close conn
+    liftChat $ Connection.close conn
     modify $ \s -> s { connection = Nothing }
     return ()
 
@@ -410,7 +375,7 @@ talk :: LB.ByteString -- ^ command
      -> ChatM ()
 talk command = do
     conn <- fromJust <$> gets connection
-    _ <- liftError $ Connection.send conn msg
+    _ <- liftChat $ Connection.send conn msg
     tell $ LB.toChunks msg
     modify $ \s -> s { lastCommand = Just msg
                      , lastReply   = Nothing
@@ -424,7 +389,7 @@ whisper :: LB.ByteString -- ^ command
         -> ChatM ()
 whisper command = do
     conn <- fromJust <$> gets connection
-    _ <- liftError $ Connection.send conn msg
+    _ <- liftChat $ Connection.send conn msg
     tell ["[...]\r\n"]
     modify $ \s -> s { lastCommand = Nothing
                      , lastReply   = Nothing
@@ -437,29 +402,35 @@ whisper command = do
 listen :: NominalDiffTime -- ^ reply timeout
        -> ChatM (Int, [ByteString])
 listen secs = do
-    deadline <- liftError $ addUTCTime secs <$> getCurrentTime
+    deadline <- liftChat $ addUTCTime secs <$> getCurrentTime
     listen' (timeoutAt deadline) (parse pReply)
   where
     listen' timeoutF parseF = do
         conn <- fromJust <$> gets connection
-        resp <- liftError $ timeoutF $ Connection.recv conn
+        resp <- liftChat $ timeoutF $ Connection.recv conn
         maybe (return ()) (tell . pure) resp
         case resp of
-            Nothing -> throwError responseTimeout
+            Nothing -> throwError [ResponseTimeout]
             Just a  -> case parseF a of
-                Fail{}          -> throwError badResponseFormat
+                Fail{}          -> throwError [BadResponseFormat]
                 Partial parseF' -> listen' timeoutF parseF'
                 Done _ reply    -> do
+                    checkRC reply
                     modify $ \s -> s { lastReply = Just reply }
                     return reply
-
--- | Check the reply code
-checkRC :: Int                 -- ^ expected reply code
-        -> (Int, [ByteString]) -- ^ reply
-        -> ChatM (Int, [ByteString])
-checkRC expected reply@(rcode, _)
-    | rcode == expected = return reply
-    | otherwise         = throwError badResponseCode
+    checkRC :: (Int, [ByteString]) -> ChatM ()
+    checkRC (rcode, _)
+        | rcode >= 200 && rcode <= 399 = return ()
+        | rcode >= 400 && rcode <= 499 = throwError [TemporaryFailure]
+        | otherwise                    = throwError [PermanentFailure]
+    timeoutAt :: UTCTime -> IO a -> IO (Maybe a)
+    timeoutAt deadline f = do
+        secs <- diffUTCTime deadline <$> getCurrentTime
+        timeoutIn secs f
+    timeoutIn :: NominalDiffTime -> IO a -> IO (Maybe a)
+    timeoutIn secs f
+        | secs <= 0 = return Nothing
+        | otherwise = timeout (ceiling $ 1000000 * secs) f
 
 -- | Save supported extentions
 saveExtentions :: (Int, [ByteString]) -- ^ reply
@@ -476,23 +447,12 @@ saveExtentions (_, rtext) = do
 timestamp :: String -- ^ timestamp tag
           -> ChatM ()
 timestamp tag = do
-    t <- (,) tag <$> liftError getCurrentTime
+    t <- (,) tag <$> liftChat getCurrentTime
     ts <- gets timestamps
     modify $ \s -> s { timestamps = t:ts }
     return ()
 
--- | Lift an IO action into the Error monad
-liftError :: IO a -> ChatM a
-liftError f = liftIO (tryIOError f) >>= liftEither
+-- | Lift an IO action into the Chat monad, re-throwing any ClientException
+liftChat :: IO a -> ChatM a
+liftChat f = liftIO (fmap Right f `catch` \e -> return $ Left [e]) >>= liftEither
 
--- | Timeout in a certain number of seconds
-timeoutIn :: NominalDiffTime -> IO a -> IO (Maybe a)
-timeoutIn secs f
-    | secs <= 0 = return Nothing
-    | otherwise = timeout (ceiling $ 1000000 * secs) f
-
--- | Timeout at a certain time
-timeoutAt :: UTCTime -> IO a -> IO (Maybe a)
-timeoutAt deadline f = do
-    secs <- diffUTCTime deadline <$> getCurrentTime
-    timeoutIn secs f
