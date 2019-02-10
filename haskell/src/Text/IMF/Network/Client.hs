@@ -8,7 +8,7 @@ module Text.IMF.Network.Client
   , AuthParams(..)
   , ClientLog
   , MX(..)
-  , ChatState(..)
+  , ClientState(..)
   , deliver
   , runChat
   , connect
@@ -81,9 +81,6 @@ import           Network.DNS.Resolver           ( Resolver
                                                 , withResolver
                                                 , defaultResolvConf
                                                 )
-import           Safe                           ( headDef
-                                                , tailSafe
-                                                )
 import           System.Timeout                 ( timeout )
 
 
@@ -139,7 +136,7 @@ data MX = MX
   deriving (Show, Eq)
 
 -- | SMTP chat state
-data ChatState = ChatState
+data ClientState = ClientState
     { connection  :: Maybe Connection          -- ^ mx server connection
     , mxServer    :: Maybe MX                  -- ^ mx server details
     , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
@@ -148,8 +145,8 @@ data ChatState = ChatState
     }
   deriving (Show, Eq)
 
-instance Default ChatState where
-    def = ChatState
+instance Default ClientState where
+    def = ClientState
         { connection  = Nothing
         , mxServer    = Nothing
         , lastCommand = Nothing
@@ -174,7 +171,7 @@ instance Default ChatState where
 -- `deliver`.
 --
 deliver :: Request -- ^ request
-        -> IO (ChatState, ClientLog)
+        -> IO (ClientState, ClientLog)
 deliver req = runChat chat req def
   where
     chat = do
@@ -192,19 +189,19 @@ deliver req = runChat chat req def
         disconnect
 
 -- | SMTP chat monad
-type ChatM = ExceptT [ClientException] (RWST Request ClientLog ChatState IO)
+type Chat = ExceptT [ClientException] (RWST Request ClientLog ClientState IO)
 
 -- | Unwrap a SMTP chat monad into an IO action
-runChat :: ChatM ()   -- ^ chat monad
-        -> Request    -- ^ request
-        -> ChatState  -- ^ initial chat state
-        -> IO (ChatState, ClientLog)
+runChat :: Chat ()     -- ^ chat monad
+        -> Request     -- ^ request
+        -> ClientState -- ^ initial chat state
+        -> IO (ClientState, ClientLog)
 runChat f = execRWST (runExceptT $ f `catchError` handleError)
   where
     handleError es = modify $ \s -> s { errors = es }
 
 -- | Lookup and connect to the MX server
-connect :: ChatM ()
+connect :: Chat ()
 connect = do
     relay <- asks reqMailRelay
     domain <- mboxDomain <$> asks reqRecipient
@@ -242,13 +239,13 @@ connect = do
                 Right (r:_) -> return $ show r
 
  -- | Verify the server greeting
-greeting :: ChatM ()
+greeting :: Chat ()
 greeting = do
     _ <- listen 300
     return ()
 
 -- | Send the HELO command
-helo :: ChatM ()
+helo :: Chat ()
 helo = do
     clientName <- asks reqClientName
     talk $ LB.fromStrict $ "HELO " `B.append` clientName `B.append` "\r\n"
@@ -256,7 +253,7 @@ helo = do
     return ()
 
 -- | Send the EHLO command
-ehlo :: ChatM ()
+ehlo :: Chat ()
 ehlo = do
     clientName <- asks reqClientName
     talk $ LB.fromStrict $ "EHLO " `B.append` clientName `B.append` "\r\n"
@@ -265,11 +262,11 @@ ehlo = do
     return ()
 
 -- | Try to send the EHLO command, fallback to HELO if necessary
-hello :: ChatM ()
+hello :: Chat ()
 hello = ehlo `catchError` const helo
 
 -- | Send the STARTTLS command and negotiate TLS context
-startTLS :: ChatM ()
+startTLS :: Chat ()
 startTLS = do
     conn <- fromJust <$> gets connection
     tlsServerParams <- lookup "starttls" . mxExtentions . fromJust <$> gets mxServer
@@ -292,7 +289,7 @@ startTLS = do
             | isRequired -> throwError [TLSNotSupported]
             | otherwise  -> return ()
 
-auth :: ChatM ()
+auth :: Chat ()
 auth = do
     conn <- fromJust <$> gets connection
     authServerParams <- lookup "auth" . mxExtentions . fromJust <$> gets mxServer
@@ -320,7 +317,7 @@ auth = do
             | otherwise  -> return ()
 
 -- | Send the MAIL FROM command
-mailFrom :: ChatM ()
+mailFrom :: Chat ()
 mailFrom = do
     sender <- asks reqSender
     talk $ LB.fromStrict $ "MAIL FROM: " `B.append` C.pack (mboxAngleAddr sender) `B.append` "\r\n"
@@ -328,7 +325,7 @@ mailFrom = do
     return ()
 
 -- | Send the RCPT TO command
-rcptTo :: ChatM ()
+rcptTo :: Chat ()
 rcptTo = do
     recipient <- asks reqRecipient
     talk $ LB.fromStrict $ "RCPT TO: " `B.append` C.pack (mboxAngleAddr recipient) `B.append` "\r\n"
@@ -336,35 +333,35 @@ rcptTo = do
     return ()
 
 -- | Send the DATA command
-dataInit :: ChatM ()
+dataInit :: Chat ()
 dataInit = do
     talk "DATA\r\n"
     _ <- listen 120
     return ()
 
 -- | Send the data block
-dataBlock :: ChatM ()
+dataBlock :: Chat ()
 dataBlock = do
     msg <- asks reqMessage
     whisper $ msg `LB.append` "\r\n"
     return ()
 
 -- | Terminate the data block
-dataTerm :: ChatM ()
+dataTerm :: Chat ()
 dataTerm = do
     talk ".\r\n"
     _ <- listen 600
     return ()
 
 -- | Send the QUIT command
-quit :: ChatM ()
+quit :: Chat ()
 quit = do
     talk "QUIT\r\n"
     _ <- listen 120
     return ()
 
 -- | Close the connection to the MX server
-disconnect :: ChatM ()
+disconnect :: Chat ()
 disconnect = do
     conn <- fromJust <$> gets connection
     liftChat $ Connection.close conn
@@ -374,7 +371,7 @@ disconnect = do
 -- | Send and log the command
 {-# ANN talk ("HLint: ignore Reduce duplication" :: String) #-}
 talk :: LB.ByteString -- ^ command
-     -> ChatM ()
+     -> Chat ()
 talk msg = do
     conn <- fromJust <$> gets connection
     _ <- liftChat $ Connection.send conn msg
@@ -388,7 +385,7 @@ talk msg = do
 -- | Send the command and log a redacted string
 {-# ANN whisper ("HLint: ignore Reduce duplication" :: String) #-}
 whisper :: LB.ByteString -- ^ command
-        -> ChatM ()
+        -> Chat ()
 whisper msg = do
     conn <- fromJust <$> gets connection
     _ <- liftChat $ Connection.send conn msg
@@ -401,7 +398,7 @@ whisper msg = do
 
 -- | Listen for a server reply and log it
 listen :: NominalDiffTime -- ^ reply timeout
-       -> ChatM (Int, [ByteString])
+       -> Chat (Int, [ByteString])
 listen secs = do
     deadline <- liftChat $ addUTCTime secs <$> getCurrentTime
     listen' (timeoutAt deadline) (parse pReply)
@@ -421,7 +418,7 @@ listen secs = do
                         checkRC reply
                         modify $ \s -> s { lastReply = Just reply }
                         return reply
-    checkRC :: (Int, [ByteString]) -> ChatM ()
+    checkRC :: (Int, [ByteString]) -> Chat ()
     checkRC (rcode, _)
         | rcode >= 200 && rcode <= 399 = return ()
         | rcode >= 400 && rcode <= 499 = throwError [TemporaryFailure]
@@ -437,16 +434,14 @@ listen secs = do
 
 -- | Save supported extentions
 saveExtentions :: (Int, [ByteString]) -- ^ reply
-               -> ChatM ()
+               -> Chat ()
 saveExtentions (_, rtext) = do
-    let es = map (split . words . map toLower . C.unpack) $ drop 1 rtext
+    let es = map ((\(w:ws) -> (w, ws)) . words . map toLower . C.unpack) $ drop 1 rtext
     mxServer <- fromJust <$> gets mxServer
     modify $ \s -> s { mxServer = Just $ mxServer { mxExtentions = es } }
     return ()
-  where
-    split as = (headDef "" as, tailSafe as)
 
 -- | Lift an IO action into the Chat monad, re-throwing any ClientException
-liftChat :: IO a -> ChatM a
+liftChat :: IO a -> Chat a
 liftChat f = liftIO (fmap Right f `catch` \e -> return $ Left [e]) >>= liftEither
 
