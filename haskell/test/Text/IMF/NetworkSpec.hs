@@ -3,6 +3,7 @@
 module Text.IMF.NetworkSpec where
 
 import           Data.Default.Class             ( def )
+import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString               as B
 import qualified Data.ByteString.Char8         as C
 import qualified Data.ByteString.Lazy          as LB
@@ -62,6 +63,9 @@ getTestRequest = do
         , reqMessage = msg
         }
 
+concatLog :: ClientLog -> ByteString
+concatLog = B.concat . map (\(_, _, msg) -> msg)
+
 getServerSocket :: IO Socket
 getServerSocket = do
     -- setup server socket
@@ -110,10 +114,9 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Nothing
                                            , lastReply   = Just (220, ["smtp.example.com ESMTP Postfix"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat ["220 smtp.example.com ESMTP Postfix\r\n"]
+                    concatLog chatLog `shouldBe` B.concat ["220 smtp.example.com ESMTP Postfix\r\n"]
             chatTest clientAct serverAct
 
     describe "hello (ehlo)" $
@@ -129,12 +132,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
                                            , lastCommand = Just "EHLO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "hello (helo)" $
@@ -152,14 +154,13 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just "HELO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
-                                                         , "502 Command not implemented\r\n"
-                                                         , "HELO relay.example.com\r\n"
-                                                         , "250 smtp.example.com, I am glad to meet you\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                          , "502 Command not implemented\r\n"
+                                                          , "HELO relay.example.com\r\n"
+                                                          , "250 smtp.example.com, I am glad to meet you\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "startTLS" $
@@ -176,8 +177,7 @@ spec = do
                                         }
                     ctx <- TLS.contextNew sock tlsParams
                     _ <- TLS.handshake ctx
-                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com"
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com\r\n"
                     _ <- TLS.sendData ctx "250-smtp.example.com\r\n250 STARTTLS\r\n"
                     return ()
                 clientAct = do
@@ -187,17 +187,16 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[])]
                                            , lastCommand = Just "EHLO relay.example.com\r\n"
                                            , lastReply   = Just (250, ["smtp.example.com", "STARTTLS"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250 STARTTLS\r\n"
-                                                         , "STARTTLS\r\n"
-                                                         , "220 Go ahead\r\n"
-                                                         , "[...]\r\n"
-                                                         , "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250 STARTTLS\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250 STARTTLS\r\n"
+                                                          , "STARTTLS\r\n"
+                                                          , "220 Go ahead\r\n"
+                                                          , "[negotiate tls]r\n"
+                                                          , "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250 STARTTLS\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "auth (login)" $
@@ -214,17 +213,13 @@ spec = do
                                         }
                     ctx <- TLS.contextNew sock tlsParams
                     _ <- TLS.handshake ctx
-                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com"
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com\r\n"
                     _ <- TLS.sendData ctx "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
-                    _ <- TLS.recvData ctx `shouldReturn` "AUTH LOGIN"
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "AUTH LOGIN\r\n"
                     _ <- TLS.sendData ctx "334 VXNlcm5hbWU6\r\n"
-                    _ <- TLS.recvData ctx `shouldReturn` "dXNlcm5hbWU="
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "dXNlcm5hbWU=\r\n"
                     _ <- TLS.sendData ctx "334 UGFzc3dvcmQ6\r\n"
-                    _ <- TLS.recvData ctx `shouldReturn` "cGFzc3dvcmQ="
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "cGFzc3dvcmQ=\r\n"
                     _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
                     return ()
                 clientAct = do
@@ -234,19 +229,18 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["login"])]
                                            , lastCommand = Nothing
                                            , lastReply   = Just (235, ["Authentication successful."])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
-                                                         , "STARTTLS\r\n"
-                                                         , "220 Go ahead\r\n"
-                                                         , "[...]\r\n"
-                                                         , "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
-                                                         , "AUTH LOGIN\r\n"
-                                                         , "334 VXNlcm5hbWU6\r\n"
-                                                         , "[...]\r\n"
+                    concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                                                          , "STARTTLS\r\n"
+                                                          , "220 Go ahead\r\n"
+                                                          , "[negotiate tls]r\n"
+                                                          , "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
+                                                          , "AUTH LOGIN\r\n"
+                                                          , "334 VXNlcm5hbWU6\r\n"
+                                                          , "[...]\r\n"
                                                          , "334 UGFzc3dvcmQ6\r\n"
                                                          , "[...]\r\n"
                                                          , "235 Authentication successful.\r\n"
@@ -267,11 +261,9 @@ spec = do
                                         }
                     ctx <- TLS.contextNew sock tlsParams
                     _ <- TLS.handshake ctx
-                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com"
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "EHLO relay.example.com\r\n"
                     _ <- TLS.sendData ctx "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
-                    _ <- TLS.recvData ctx `shouldReturn` "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ="
-                    _ <- TLS.recvData ctx `shouldReturn` "\r\n"
+                    _ <- TLS.recvData ctx `shouldReturn` "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r\n"
                     _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
                     return ()
                 clientAct = do
@@ -281,19 +273,18 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["plain"])]
                                            , lastCommand = Nothing
                                            , lastReply   = Just (235, ["Authentication successful."])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
-                                                         , "STARTTLS\r\n"
-                                                         , "220 Go ahead\r\n"
-                                                         , "[...]\r\n"
-                                                         , "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
-                                                         , "[...]\r\n"
-                                                         , "235 Authentication successful.\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                                                          , "STARTTLS\r\n"
+                                                          , "220 Go ahead\r\n"
+                                                          , "[negotiate tls]r\n"
+                                                          , "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
+                                                          , "[...]\r\n"
+                                                          , "235 Authentication successful.\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "mailFrom" $
@@ -309,12 +300,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just "MAIL FROM: <jdoe@localhost>\r\n"
                                            , lastReply   = Just (250, ["Ok"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "MAIL FROM: <jdoe@localhost>\r\n"
-                                                         , "250 Ok\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "MAIL FROM: <jdoe@localhost>\r\n"
+                                                          , "250 Ok\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "rcptTo" $
@@ -330,12 +320,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just "RCPT TO: <mary@localhost>\r\n"
                                            , lastReply   = Just (250, ["Ok"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "RCPT TO: <mary@localhost>\r\n"
-                                                         , "250 Ok\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "RCPT TO: <mary@localhost>\r\n"
+                                                          , "250 Ok\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "dataInit" $
@@ -351,12 +340,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just "DATA\r\n"
                                            , lastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "DATA\r\n"
-                                                         , "354 End data with <CR><LF>.<CR><LF>\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "DATA\r\n"
+                                                          , "354 End data with <CR><LF>.<CR><LF>\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "dataBlock" $
@@ -371,10 +359,9 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Nothing
                                            , lastReply   = Nothing
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat ["[...]\r\n"]
+                    concatLog chatLog `shouldBe` B.concat ["[...]\r\n"]
             chatTest clientAct serverAct
 
     describe "dataTerm" $
@@ -390,12 +377,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just ".\r\n"
                                            , lastReply   = Just (250, ["Ok: queued as 12345"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ ".\r\n"
-                                                         , "250 Ok: queued as 12345\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ ".\r\n"
+                                                          , "250 Ok: queued as 12345\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "quit" $
@@ -411,12 +397,11 @@ spec = do
                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
                                            , lastCommand = Just "QUIT\r\n"
                                            , lastReply   = Just (221, ["Bye"])
-                                           , timestamps  = []
                                            , errors      = []
                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "QUIT\r\n"
-                                                         , "221 Bye\r\n"
-                                                         ]
+                    concatLog chatLog `shouldBe` B.concat [ "QUIT\r\n"
+                                                          , "221 Bye\r\n"
+                                                          ]
             chatTest clientAct serverAct
 
     describe "deliver" $
@@ -440,28 +425,26 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- deliver req
-                    let s' = s { timestamps = [] }
-                    s' `shouldBe` ChatState { connection  = Nothing
-                                            , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
-                                            , lastCommand = Just "QUIT\r\n"
-                                            , lastReply   = Just (221, ["Bye"])
-                                            , timestamps  = []
-                                            , errors      = []
-                                            }
-                    B.concat chatLog `shouldBe` B.concat [ "220 smtp.example.com ESMTP Postfix\r\n"
-                                                         , "EHLO relay.example.com\r\n"
-                                                         , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
-                                                         , "MAIL FROM: <jdoe@localhost>\r\n"
-                                                         , "250 Ok\r\n"
-                                                         , "RCPT TO: <mary@localhost>\r\n"
-                                                         , "250 Ok\r\n"
-                                                         , "DATA\r\n"
-                                                         , "354 End data with <CR><LF>.<CR><LF>\r\n"
-                                                         , "[...]\r\n"
-                                                         , ".\r\n"
-                                                         , "250 Ok: queued as 12345\r\n"
-                                                         , "QUIT\r\n"
-                                                         , "221 Bye\r\n"
-                                                         ]
+                    s `shouldBe` ChatState { connection  = Nothing
+                                           , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
+                                           , lastCommand = Just "QUIT\r\n"
+                                           , lastReply   = Just (221, ["Bye"])
+                                           , errors      = []
+                                           }
+                    concatLog chatLog `shouldBe` B.concat [ "220 smtp.example.com ESMTP Postfix\r\n"
+                                                          , "EHLO relay.example.com\r\n"
+                                                          , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
+                                                          , "MAIL FROM: <jdoe@localhost>\r\n"
+                                                          , "250 Ok\r\n"
+                                                          , "RCPT TO: <mary@localhost>\r\n"
+                                                          , "250 Ok\r\n"
+                                                          , "DATA\r\n"
+                                                          , "354 End data with <CR><LF>.<CR><LF>\r\n"
+                                                          , "[...]\r\n"
+                                                          , ".\r\n"
+                                                          , "250 Ok: queued as 12345\r\n"
+                                                          , "QUIT\r\n"
+                                                          , "221 Bye\r\n"
+                                                          ]
             chatTest clientAct serverAct
 

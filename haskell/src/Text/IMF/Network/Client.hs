@@ -1,11 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE TupleSections     #-}
 
 module Text.IMF.Network.Client
   ( Request(..)
   , TLSParams(..)
   , AuthParams(..)
-  , ChatLog
+  , ClientLog
   , MX(..)
   , ChatState(..)
   , deliver
@@ -122,8 +123,11 @@ data Request = Request
     }
   deriving (Show, Eq)
 
+data LogEntryType = Send | Recv | Both
+  deriving (Show, Eq)
+
 -- | SMTP chat log
-type ChatLog = [ByteString]
+type ClientLog = [(UTCTime, LogEntryType, ByteString)]
 
 -- | Mail exchange server details
 data MX = MX
@@ -140,7 +144,6 @@ data ChatState = ChatState
     , mxServer    :: Maybe MX                  -- ^ mx server details
     , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
     , lastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
-    , timestamps  :: [(String, UTCTime)]       -- ^ timestamps
     , errors      :: [ClientException]         -- ^ any errors encountered
     }
   deriving (Show, Eq)
@@ -151,7 +154,6 @@ instance Default ChatState where
         , mxServer    = Nothing
         , lastCommand = Nothing
         , lastReply   = Nothing
-        , timestamps  = []
         , errors      = []
         }
 
@@ -172,11 +174,10 @@ instance Default ChatState where
 -- `deliver`.
 --
 deliver :: Request -- ^ request
-        -> IO (ChatState, ChatLog)
+        -> IO (ChatState, ClientLog)
 deliver req = runChat chat req def
   where
     chat = do
-        timestamp "opening chat"
         connect
         greeting
         hello
@@ -189,16 +190,15 @@ deliver req = runChat chat req def
         dataTerm
         quit
         disconnect
-        timestamp "closing chat"
 
 -- | SMTP chat monad
-type ChatM = ExceptT [ClientException] (RWST Request ChatLog ChatState IO)
+type ChatM = ExceptT [ClientException] (RWST Request ClientLog ChatState IO)
 
 -- | Unwrap a SMTP chat monad into an IO action
 runChat :: ChatM ()   -- ^ chat monad
         -> Request    -- ^ request
         -> ChatState  -- ^ initial chat state
-        -> IO (ChatState, ChatLog)
+        -> IO (ChatState, ClientLog)
 runChat f = execRWST (runExceptT $ f `catchError` handleError)
   where
     handleError es = modify $ \s -> s { errors = es }
@@ -251,7 +251,7 @@ greeting = do
 helo :: ChatM ()
 helo = do
     clientName <- asks reqClientName
-    talk $ LB.fromStrict $ B.append "HELO " clientName
+    talk $ LB.fromStrict $ "HELO " `B.append` clientName `B.append` "\r\n"
     _ <- listen 300
     return ()
 
@@ -259,7 +259,7 @@ helo = do
 ehlo :: ChatM ()
 ehlo = do
     clientName <- asks reqClientName
-    talk $ LB.fromStrict $ B.append "EHLO " clientName
+    talk $ LB.fromStrict $ "EHLO " `B.append` clientName `B.append` "\r\n"
     r <- listen 300
     saveExtentions r
     return ()
@@ -278,12 +278,13 @@ startTLS = do
         (Nothing, _) -> return ()
         (Just (TLSParams _ isValidated), Just _) -> do
             -- issue command and wait for response
-            talk "STARTTLS"
+            talk "STARTTLS\r\n"
             _ <- listen 120
             -- negotiate TLS context
             hostname <- mxHostname . fromJust <$> gets mxServer
             conn' <- liftChat $ Connection.negotiateTLS conn hostname isValidated
-            tell ["[...]\r\n"]
+            now <- liftChat getCurrentTime
+            tell [(now, Both, "[negotiate tls]r\n")]
             modify $ \s -> s { connection = Just conn' }
             -- test TLS context by re-issuing hello
             hello
@@ -301,16 +302,16 @@ auth = do
         (Just (AuthParams _ user pass), Just methods)
             | "login" `elem` methods -> do
                 unless (Connection.isTLS conn) $ throwError [AuthNotEncrypted]
-                talk "AUTH LOGIN"
+                talk "AUTH LOGIN\r\n"
                 _ <- listen 120
-                whisper $ LB.fromStrict $ B64.encode $ C.pack user
+                whisper $ LB.fromStrict $ B64.encode (C.pack user) `B.append` "\r\n"
                 _ <- listen 120
-                whisper $ LB.fromStrict $ B64.encode $ C.pack pass
+                whisper $ LB.fromStrict $ B64.encode (C.pack pass) `B.append` "\r\n"
                 _ <- listen 120
                 return ()
             | "plain" `elem` methods -> do
                 unless (Connection.isTLS conn) $ throwError [AuthNotEncrypted]
-                whisper $ LB.fromStrict $ B.append "AUTH PLAIN " $ B64.encode $ B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]
+                whisper $ LB.fromStrict $ "AUTH PLAIN " `B.append` B64.encode (B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]) `B.append` "\r\n"
                 _ <- listen 120
                 return ()
             | otherwise -> throwError [AuthMethodNotSupported]
@@ -322,7 +323,7 @@ auth = do
 mailFrom :: ChatM ()
 mailFrom = do
     sender <- asks reqSender
-    talk $ LB.fromStrict $ B.append "MAIL FROM: " $ C.pack $ mboxAngleAddr sender
+    talk $ LB.fromStrict $ "MAIL FROM: " `B.append` C.pack (mboxAngleAddr sender) `B.append` "\r\n"
     _ <- listen 300
     return ()
 
@@ -330,14 +331,14 @@ mailFrom = do
 rcptTo :: ChatM ()
 rcptTo = do
     recipient <- asks reqRecipient
-    talk $ LB.fromStrict $ B.append "RCPT TO: " $ C.pack $ mboxAngleAddr recipient
+    talk $ LB.fromStrict $ "RCPT TO: " `B.append` C.pack (mboxAngleAddr recipient) `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the DATA command
 dataInit :: ChatM ()
 dataInit = do
-    talk "DATA"
+    talk "DATA\r\n"
     _ <- listen 120
     return ()
 
@@ -345,20 +346,20 @@ dataInit = do
 dataBlock :: ChatM ()
 dataBlock = do
     msg <- asks reqMessage
-    whisper msg
+    whisper $ msg `LB.append` "\r\n"
     return ()
 
 -- | Terminate the data block
 dataTerm :: ChatM ()
 dataTerm = do
-    talk "."
+    talk ".\r\n"
     _ <- listen 600
     return ()
 
 -- | Send the QUIT command
 quit :: ChatM ()
 quit = do
-    talk "QUIT"
+    talk "QUIT\r\n"
     _ <- listen 120
     return ()
 
@@ -371,32 +372,32 @@ disconnect = do
     return ()
 
 -- | Send and log the command
+{-# ANN talk ("HLint: ignore Reduce duplication" :: String) #-}
 talk :: LB.ByteString -- ^ command
      -> ChatM ()
-talk command = do
+talk msg = do
     conn <- fromJust <$> gets connection
     _ <- liftChat $ Connection.send conn msg
-    tell $ LB.toChunks msg
+    now <- liftChat getCurrentTime
+    tell $ map (now, Send, ) $ LB.toChunks msg
     modify $ \s -> s { lastCommand = Just msg
                      , lastReply   = Nothing
                      }
     return ()
-  where
-    msg = LB.append command "\r\n"
 
 -- | Send the command and log a redacted string
+{-# ANN whisper ("HLint: ignore Reduce duplication" :: String) #-}
 whisper :: LB.ByteString -- ^ command
         -> ChatM ()
-whisper command = do
+whisper msg = do
     conn <- fromJust <$> gets connection
     _ <- liftChat $ Connection.send conn msg
-    tell ["[...]\r\n"]
+    now <- liftChat getCurrentTime
+    tell [(now, Send, "[...]\r\n")]
     modify $ \s -> s { lastCommand = Nothing
                      , lastReply   = Nothing
                      }
     return ()
-  where
-    msg = LB.append command "\r\n"
 
 -- | Listen for a server reply and log it
 listen :: NominalDiffTime -- ^ reply timeout
@@ -408,16 +409,18 @@ listen secs = do
     listen' timeoutF parseF = do
         conn <- fromJust <$> gets connection
         resp <- liftChat $ timeoutF $ Connection.recv conn
-        maybe (return ()) (tell . pure) resp
         case resp of
-            Nothing -> throwError [ResponseTimeout]
-            Just a  -> case parseF a of
-                Fail{}          -> throwError [BadResponseFormat]
-                Partial parseF' -> listen' timeoutF parseF'
-                Done _ reply    -> do
-                    checkRC reply
-                    modify $ \s -> s { lastReply = Just reply }
-                    return reply
+            Nothing    -> throwError [ResponseTimeout]
+            Just chunk -> do
+                now <- liftChat getCurrentTime
+                tell [(now, Recv, chunk)]
+                case parseF chunk of
+                    Fail{}          -> throwError [BadResponseFormat]
+                    Partial parseF' -> listen' timeoutF parseF'
+                    Done _ reply    -> do
+                        checkRC reply
+                        modify $ \s -> s { lastReply = Just reply }
+                        return reply
     checkRC :: (Int, [ByteString]) -> ChatM ()
     checkRC (rcode, _)
         | rcode >= 200 && rcode <= 399 = return ()
@@ -442,15 +445,6 @@ saveExtentions (_, rtext) = do
     return ()
   where
     split as = (headDef "" as, tailSafe as)
-
--- | Add a timestamp
-timestamp :: String -- ^ timestamp tag
-          -> ChatM ()
-timestamp tag = do
-    t <- (,) tag <$> liftChat getCurrentTime
-    ts <- gets timestamps
-    modify $ \s -> s { timestamps = t:ts }
-    return ()
 
 -- | Lift an IO action into the Chat monad, re-throwing any ClientException
 liftChat :: IO a -> ChatM a

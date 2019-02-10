@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Add support to SMTP client for ELHO with fallback to HELO
 - Add support to SMTP client for multiline replies
 ### Changed
+- Move SMTP chat timestamps into the client log
 - Stopped modifying line endings in SMTP chat log entries
 - Fixed pedantic errors
 
