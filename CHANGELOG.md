@@ -5,7 +5,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
+### Added
+- Add support to SMTP client recipient host override
+- Add support to SMTP client for AUTH PLAIN/LOGIN
+- Add support to SMTP client for STARTTLS
+- Add extention list to SMTP client state
+- Add support to SMTP client for ELHO with fallback to HELO
+- Add support to SMTP client for multiline replies
 ### Changed
+- Move SMTP chat timestamps into the client log
+- Stopped modifying line endings in SMTP chat log entries
 - Fixed pedantic errors
 
 ## [0.4.0]
