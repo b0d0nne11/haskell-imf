@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
+
+## [0.5.0] - 2019-02-10
 ### Added
 - Add support to SMTP client recipient host override
 - Add support to SMTP client for AUTH PLAIN/LOGIN
