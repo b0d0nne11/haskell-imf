@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
 
 module Text.IMF.Network.Client
@@ -26,72 +26,41 @@ module Text.IMF.Network.Client
   )
 where
 
-import           Control.Applicative            ( (<|>)
-                                                , empty
-                                                )
-import           Control.Exception              ( catch
-                                                , throwIO
-                                                )
-import           Control.Monad                  ( unless )
-import           Control.Monad.Reader           ( MonadReader
-                                                , asks
-                                                )
-import           Control.Monad.Writer           ( MonadWriter
-                                                , tell
-                                                )
-import           Control.Monad.State            ( MonadState
-                                                , gets
-                                                , modify
-                                                )
-import           Control.Monad.RWS              ( RWST
-                                                , execRWST
-                                                )
-import           Control.Monad.Except           ( ExceptT
-                                                , runExceptT
-                                                , throwError
-                                                , catchError
-                                                , liftEither
-                                                )
-import           Control.Monad.Trans            ( liftIO )
-import           Data.Attoparsec.ByteString     ( IResult(..)
-                                                , parse
-                                                )
-import           Data.ByteString                ( ByteString )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Char8         as C
-import qualified Data.ByteString.Lazy          as LB
-import qualified Data.ByteString.Base64        as B64
-import           Data.Char                      ( toLower )
-import           Data.Default.Class             ( Default
-                                                , def
-                                                )
-import           Data.List                      ( sortOn )
-import           Data.Maybe                     ( fromJust )
-import           Data.Time.Clock                ( UTCTime
-                                                , NominalDiffTime
-                                                , getCurrentTime
-                                                , addUTCTime
-                                                , diffUTCTime
-                                                )
-import           Network.DNS.Lookup             ( lookupMX
-                                                , lookupA
-                                                )
-import           Network.DNS.Resolver           ( Resolver
-                                                , makeResolvSeed
-                                                , withResolver
-                                                , defaultResolvConf
-                                                )
-import           System.Timeout                 ( timeout )
+import           Control.Applicative         (empty, (<|>))
+import           Control.Exception           (catch, throwIO)
+import           Control.Monad               (unless)
+import           Control.Monad.Except        (ExceptT, catchError, liftEither,
+                                              runExceptT, throwError)
+import           Control.Monad.Reader        (MonadReader, asks)
+import           Control.Monad.RWS           (RWST, execRWST)
+import           Control.Monad.State         (MonadState, gets, modify)
+import           Control.Monad.Trans         (liftIO)
+import           Control.Monad.Writer        (MonadWriter, tell)
+import           Data.Attoparsec.ByteString  (IResult (..), parse)
+import           Data.ByteString             (ByteString)
+import qualified Data.ByteString             as B
+import qualified Data.ByteString.Base64      as B64
+import qualified Data.ByteString.Char8       as C
+import qualified Data.ByteString.Lazy        as LB
+import           Data.Char                   (toLower)
+import           Data.Default.Class          (Default, def)
+import           Data.List                   (sortOn)
+import           Data.Maybe                  (fromJust)
+import           Data.Time.Clock             (NominalDiffTime, UTCTime,
+                                              addUTCTime, diffUTCTime,
+                                              getCurrentTime)
+import           Network.DNS.Lookup          (lookupA, lookupMX)
+import           Network.DNS.Resolver        (Resolver, defaultResolvConf,
+                                              makeResolvSeed, withResolver)
+import           System.Timeout              (timeout)
 
 
-import           Text.IMF.Mailbox               ( Mailbox(..)
-                                                , mboxAngleAddr
-                                                )
-import           Text.IMF.Format                ( formatMessage )
-import           Text.IMF.Parsers.Client        ( pReply )
-import qualified Text.IMF.Network.Connection   as Connection
-import           Text.IMF.Network.Connection    ( Connection )
-import           Text.IMF.Network.Errors        ( ClientException(..) )
+import           Text.IMF.Format             (formatMessage)
+import           Text.IMF.Mailbox            (Mailbox (..), mboxAngleAddr)
+import           Text.IMF.Network.Connection (Connection)
+import qualified Text.IMF.Network.Connection as Connection
+import           Text.IMF.Network.Errors     (ClientException (..))
+import           Text.IMF.Parsers.Client     (pReply)
 
 -- | Opportunistic TLS parameters
 data TLSParams = TLSParams
@@ -110,13 +79,14 @@ data AuthParams = AuthParams
 
 -- | Request parameters
 data Request = Request
-    { reqClientName    :: ByteString       -- ^ client name
-    , reqMailRelay     :: Maybe String     -- ^ mail relay
-    , reqTLS           :: Maybe TLSParams  -- ^ opportunistic TLS
-    , reqAuth          :: Maybe AuthParams -- ^ authentication
-    , reqSender        :: Mailbox          -- ^ sender
-    , reqRecipient     :: Mailbox          -- ^ recipient
-    , reqMessage       :: LB.ByteString    -- ^ message
+    { reqClientName  :: ByteString       -- ^ client name
+    , reqSourceIP    :: Maybe String     -- ^ source IP address
+    , reqTargetHosts :: Maybe [String]   -- ^ target hosts
+    , reqTLS         :: Maybe TLSParams  -- ^ opportunistic TLS
+    , reqAuth        :: Maybe AuthParams -- ^ authentication
+    , reqSender      :: Mailbox          -- ^ sender
+    , reqRecipient   :: Mailbox          -- ^ recipient
+    , reqMessage     :: LB.ByteString    -- ^ message
     }
   deriving (Show, Eq)
 
@@ -137,21 +107,21 @@ data MX = MX
 
 -- | SMTP chat state
 data ClientState = ClientState
-    { connection  :: Maybe Connection          -- ^ mx server connection
-    , mxServer    :: Maybe MX                  -- ^ mx server details
-    , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
-    , lastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
-    , errors      :: [ClientException]         -- ^ any errors encountered
+    { connection      :: Maybe Connection          -- ^ mx server connection
+    , mxServer        :: Maybe MX                  -- ^ mx server details
+    , respLastCommand :: Maybe LB.ByteString       -- ^ the last command sent
+    , respLastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
+    , respLastErrors  :: [ClientException]         -- ^ any errors encountered
     }
   deriving (Show, Eq)
 
 instance Default ClientState where
     def = ClientState
-        { connection  = Nothing
-        , mxServer    = Nothing
-        , lastCommand = Nothing
-        , lastReply   = Nothing
-        , errors      = []
+        { connection      = Nothing
+        , mxServer        = Nothing
+        , respLastCommand = Nothing
+        , respLastReply   = Nothing
+        , respLastErrors  = []
         }
 
 -- | Deliver a message
@@ -198,20 +168,21 @@ runChat :: Chat ()     -- ^ chat monad
         -> IO (ClientState, ClientLog)
 runChat f = execRWST (runExceptT $ f `catchError` handleError)
   where
-    handleError es = modify $ \s -> s { errors = es }
+    handleError es = modify $ \s -> s { respLastErrors = es }
 
 -- | Lookup and connect to the MX server
 connect :: Chat ()
 connect = do
-    relay <- asks reqMailRelay
-    domain <- mboxDomain <$> asks reqRecipient
-    hosts <- maybe (liftChat $ resolveMX domain) (return . pure) relay
+    srcIP <- asks reqSourceIP
+    targetHosts <- asks reqTargetHosts
+    recipientDomain <- mboxDomain <$> asks reqRecipient
+    hosts <- maybe (liftChat $ resolveMX recipientDomain) return targetHosts
     foldl (<|>) empty $ with hosts $ \host ->
         foldl (<|>) empty $ with ports $ \port -> do
-            ip <- liftChat $ resolveA host
-            conn <- liftChat $ Connection.open ip port
+            dstIP <- liftChat $ resolveA host
+            conn <- liftChat $ Connection.open srcIP dstIP port
             modify $ \s -> s { connection = Just conn
-                             , mxServer = Just $ MX host ip port []
+                             , mxServer = Just $ MX host dstIP port []
                              }
             return ()
   where
@@ -220,8 +191,8 @@ connect = do
     resolveMX :: String -> IO [String]
     resolveMX "localhost" = return ["localhost"]
     resolveMX domain = do
-        rs <- makeResolvSeed defaultResolvConf
-        withResolver rs $ \resolver -> do
+        rseed <- makeResolvSeed defaultResolvConf
+        withResolver rseed $ \resolver -> do
             records <- lookupMX resolver $ C.pack domain
             case records of
                 Left _   -> throwIO DNSLookupFailed
@@ -230,8 +201,8 @@ connect = do
     resolveA :: String -> IO String
     resolveA "localhost" = return "127.0.0.1"
     resolveA host = do
-        rs <- makeResolvSeed defaultResolvConf
-        withResolver rs $ \resolver -> do
+        rseed <- makeResolvSeed defaultResolvConf
+        withResolver rseed $ \resolver -> do
             records <- lookupA resolver $ C.pack host
             case records of
                 Left _      -> throwIO DNSLookupFailed
@@ -377,8 +348,8 @@ talk msg = do
     _ <- liftChat $ Connection.send conn msg
     now <- liftChat getCurrentTime
     tell $ map (now, Send, ) $ LB.toChunks msg
-    modify $ \s -> s { lastCommand = Just msg
-                     , lastReply   = Nothing
+    modify $ \s -> s { respLastCommand = Just msg
+                     , respLastReply   = Nothing
                      }
     return ()
 
@@ -391,8 +362,8 @@ whisper msg = do
     _ <- liftChat $ Connection.send conn msg
     now <- liftChat getCurrentTime
     tell [(now, Send, "[...]\r\n")]
-    modify $ \s -> s { lastCommand = Nothing
-                     , lastReply   = Nothing
+    modify $ \s -> s { respLastCommand = Nothing
+                     , respLastReply   = Nothing
                      }
     return ()
 
@@ -416,7 +387,7 @@ listen secs = do
                     Partial parseF' -> listen' timeoutF parseF'
                     Done _ reply    -> do
                         checkRC reply
-                        modify $ \s -> s { lastReply = Just reply }
+                        modify $ \s -> s { respLastReply = Just reply }
                         return reply
     checkRC :: (Int, [ByteString]) -> Chat ()
     checkRC (rcode, _)

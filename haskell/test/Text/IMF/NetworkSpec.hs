@@ -2,43 +2,31 @@
 
 module Text.IMF.NetworkSpec where
 
-import           Data.Default.Class             ( def )
-import           Data.ByteString                ( ByteString )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Char8         as C
-import qualified Data.ByteString.Lazy          as LB
-import           Control.Concurrent             ( forkIO )
-import           Control.Concurrent.MVar        ( newEmptyMVar
-                                                , putMVar
-                                                , takeMVar
-                                                )
-import           Control.Exception              ( bracket )
-import           Network.Socket                 ( AddrInfo(..)
-                                                , AddrInfoFlag(..)
-                                                , SocketType(..)
-                                                , Socket
-                                                , defaultHints
-                                                , getAddrInfo
-                                                , socket
-                                                , socketPort
-                                                , bind
-                                                , listen
-                                                , accept
-                                                , close
-                                                , setSocketOption
-                                                , SocketOption (..)
-                                                )
-import qualified Network.Socket                as Socket hiding (send, recv)
-import qualified Network.Socket.ByteString     as Socket
-import qualified Network.TLS                   as TLS
-import qualified Network.TLS.Extra.Cipher      as TLS
-import qualified Network.TLS.Extra.FFDHE       as TLS
+import           Control.Concurrent          (forkIO)
+import           Control.Concurrent.MVar     (newEmptyMVar, putMVar, takeMVar)
+import           Control.Exception           (bracket)
+import           Data.ByteString             (ByteString)
+import qualified Data.ByteString             as B
+import qualified Data.ByteString.Char8       as C
+import qualified Data.ByteString.Lazy        as LB
+import           Data.Default.Class          (def)
+import           Network.Socket              (AddrInfo (..), AddrInfoFlag (..),
+                                              Socket, SocketOption (..),
+                                              SocketType (..), accept, bind,
+                                              close, defaultHints, getAddrInfo,
+                                              listen, setSocketOption, socket,
+                                              socketPort)
+import qualified Network.Socket              as Socket hiding (recv, send)
+import qualified Network.Socket.ByteString   as Socket
+import qualified Network.TLS                 as TLS
+import qualified Network.TLS.Extra.Cipher    as TLS
+import qualified Network.TLS.Extra.FFDHE     as TLS
 import           Test.Hspec
 
+import           Text.IMF.Format
+import           Text.IMF.Header
 import           Text.IMF.Mailbox
 import           Text.IMF.Message
-import           Text.IMF.Header
-import           Text.IMF.Format
 import           Text.IMF.Network.Client
 import           Text.IMF.Network.Connection (Connection)
 import qualified Text.IMF.Network.Connection as Connection
@@ -48,7 +36,8 @@ getTestRequest = do
     msg <- LB.readFile "haskell/test/Fixtures/Messages/simple_addressing_1.txt"
     return $ Request
         { reqClientName = "relay.example.com"
-        , reqMailRelay = Nothing
+        , reqSourceIP = Just "127.0.0.1"
+        , reqTargetHosts = Just ["localhost"]
         , reqTLS = Just $ TLSParams
             { tlsRequired = False
             , tlsValidate = False
@@ -110,11 +99,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> greeting >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Nothing
-                                             , lastReply   = Just (220, ["smtp.example.com ESMTP Postfix"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Nothing
+                                             , respLastReply   = Just (220, ["smtp.example.com ESMTP Postfix"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat ["220 smtp.example.com ESMTP Postfix\r\n"]
             chatTest clientAct serverAct
@@ -128,11 +117,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
-                                             , lastCommand = Just "EHLO relay.example.com\r\n"
-                                             , lastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
+                                             , respLastCommand = Just "EHLO relay.example.com\r\n"
+                                             , respLastReply   = Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
                                                           , "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
@@ -150,11 +139,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just "HELO relay.example.com\r\n"
-                                             , lastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just "HELO relay.example.com\r\n"
+                                             , respLastReply   = Just (250, ["smtp.example.com, I am glad to meet you"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
                                                           , "502 Command not implemented\r\n"
@@ -183,11 +172,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> startTLS >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[])]
-                                             , lastCommand = Just "EHLO relay.example.com\r\n"
-                                             , lastReply   = Just (250, ["smtp.example.com", "STARTTLS"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[])]
+                                             , respLastCommand = Just "EHLO relay.example.com\r\n"
+                                             , respLastReply   = Just (250, ["smtp.example.com", "STARTTLS"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
                                                           , "250-smtp.example.com\r\n250 STARTTLS\r\n"
@@ -225,11 +214,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> startTLS >> auth >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["login"])]
-                                             , lastCommand = Nothing
-                                             , lastReply   = Just (235, ["Authentication successful."])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["login"])]
+                                             , respLastCommand = Nothing
+                                             , respLastReply   = Just (235, ["Authentication successful."])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
                                                           , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
@@ -269,11 +258,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> hello >> startTLS >> auth >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["plain"])]
-                                             , lastCommand = Nothing
-                                             , lastReply   = Just (235, ["Authentication successful."])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" [("starttls",[]),("auth",["plain"])]
+                                             , respLastCommand = Nothing
+                                             , respLastReply   = Just (235, ["Authentication successful."])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "EHLO relay.example.com\r\n"
                                                           , "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
@@ -296,11 +285,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> mailFrom >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just "MAIL FROM: <jdoe@localhost>\r\n"
-                                             , lastReply   = Just (250, ["Ok"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just "MAIL FROM: <jdoe@localhost>\r\n"
+                                             , respLastReply   = Just (250, ["Ok"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "MAIL FROM: <jdoe@localhost>\r\n"
                                                           , "250 Ok\r\n"
@@ -316,11 +305,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> rcptTo >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just "RCPT TO: <mary@localhost>\r\n"
-                                             , lastReply   = Just (250, ["Ok"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just "RCPT TO: <mary@localhost>\r\n"
+                                             , respLastReply   = Just (250, ["Ok"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "RCPT TO: <mary@localhost>\r\n"
                                                           , "250 Ok\r\n"
@@ -336,11 +325,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> dataInit >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just "DATA\r\n"
-                                             , lastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just "DATA\r\n"
+                                             , respLastReply   = Just (354, ["End data with <CR><LF>.<CR><LF>"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "DATA\r\n"
                                                           , "354 End data with <CR><LF>.<CR><LF>\r\n"
@@ -355,11 +344,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> dataBlock >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Nothing
-                                             , lastReply   = Nothing
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Nothing
+                                             , respLastReply   = Nothing
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat ["[...]\r\n"]
             chatTest clientAct serverAct
@@ -373,11 +362,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> dataTerm >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just ".\r\n"
-                                             , lastReply   = Just (250, ["Ok: queued as 12345"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just ".\r\n"
+                                             , respLastReply   = Just (250, ["Ok: queued as 12345"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ ".\r\n"
                                                           , "250 Ok: queued as 12345\r\n"
@@ -393,11 +382,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- runChat (connect >> quit >> disconnect) req def
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" []
-                                             , lastCommand = Just "QUIT\r\n"
-                                             , lastReply   = Just (221, ["Bye"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" []
+                                             , respLastCommand = Just "QUIT\r\n"
+                                             , respLastReply   = Just (221, ["Bye"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "QUIT\r\n"
                                                           , "221 Bye\r\n"
@@ -425,11 +414,11 @@ spec = do
                 clientAct = do
                     req <- getTestRequest
                     (s, chatLog) <- deliver req
-                    s `shouldBe` ClientState { connection  = Nothing
-                                             , mxServer    = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
-                                             , lastCommand = Just "QUIT\r\n"
-                                             , lastReply   = Just (221, ["Bye"])
-                                             , errors      = []
+                    s `shouldBe` ClientState { connection      = Nothing
+                                             , mxServer        = Just $ MX "localhost" "127.0.0.1" "2525" [("size",["14680064"]),("pipelining",[]),("help",[])]
+                                             , respLastCommand = Just "QUIT\r\n"
+                                             , respLastReply   = Just (221, ["Bye"])
+                                             , respLastErrors  = []
                                              }
                     concatLog chatLog `shouldBe` B.concat [ "220 smtp.example.com ESMTP Postfix\r\n"
                                                           , "EHLO relay.example.com\r\n"

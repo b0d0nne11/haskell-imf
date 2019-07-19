@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Text.IMF.Network.Connection
   ( Connection
@@ -12,30 +12,24 @@ module Text.IMF.Network.Connection
   )
 where
 
-import           Control.Exception               ( throwIO
-                                                 , catch
-                                                 , handle
-                                                 )
-import           Data.ByteString                 ( ByteString )
+import           Control.Exception              (catch, handle, throwIO)
+import           Data.ByteString                (ByteString)
 import qualified Data.ByteString.Lazy           as LB
-import           Data.Default.Class              ( def )
-import           Network.Socket                  ( AddrInfo(..)
-                                                 , SocketType(..)
-                                                 , Socket
-                                                 , AddrInfoFlag(..)
-                                                 , getAddrInfo
-                                                 , socket
-                                                 , connect
-                                                 , defaultHints
-                                                 )
-import qualified Network.Socket                 as Socket hiding (sendAll, recv)
+import           Data.Default.Class             (def)
+import           Network.Socket                 (AddrInfo (..),
+                                                 AddrInfoFlag (..), Family (..),
+                                                 Socket, SocketType (..), bind,
+                                                 connect, defaultHints,
+                                                 defaultProtocol, getAddrInfo,
+                                                 socket)
+import qualified Network.Socket                 as Socket hiding (recv, sendAll)
 import qualified Network.Socket.ByteString      as Socket (recv)
 import qualified Network.Socket.ByteString.Lazy as Socket (sendAll)
 import qualified Network.TLS                    as TLS
 import qualified Network.TLS.Extra.Cipher       as TLS
-import           System.X509                     ( getSystemCertificateStore )
+import           System.X509                    (getSystemCertificateStore)
 
-import           Text.IMF.Network.Errors         ( ClientException(..) )
+import           Text.IMF.Network.Errors        (ClientException (..))
 
 data Connection = Plain Socket | TLS Socket TLS.Context
 
@@ -49,18 +43,36 @@ instance Eq Connection where
     _ == _ = False
 
 -- | Open a new connection
-open :: String -- ^ ip address
-     -> String -- ^ port
+open :: Maybe String -- ^ source ip address
+     -> String       -- ^ destination ip address
+     -> String       -- ^ destination port
      -> IO Connection
-open ip port =
+open Nothing dstIP port =
     handle (throwIO . ConnectFailure) $ do
-        addr:_ <- getAddrInfo (Just hints) (Just ip) (Just port)
-        sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
-        connect sock $ addrAddress addr
+        dstAddr:_ <- getAddrInfo hints (Just dstIP) (Just port)
+        sock <- getSocket
+        connect sock $ addrAddress dstAddr
         return $ Plain sock
   where
-    hints = defaultHints
+    getSocket = socket AF_INET Stream defaultProtocol
+    hints = Just $ defaultHints
         { addrFlags = [AI_NUMERICHOST, AI_NUMERICSERV]
+        , addrFamily = AF_INET
+        , addrSocketType = Stream
+        }
+open (Just srcIP) dstIP port =
+    handle (throwIO . ConnectFailure) $ do
+        srcAddr:_ <- getAddrInfo hints (Just srcIP) (Just "0")
+        dstAddr:_ <- getAddrInfo hints (Just dstIP) (Just port)
+        sock <- getSocket
+        bind sock $ addrAddress srcAddr
+        connect sock $ addrAddress dstAddr
+        return $ Plain sock
+  where
+    getSocket = socket AF_INET Stream defaultProtocol
+    hints = Just $ defaultHints
+        { addrFlags = [AI_NUMERICHOST, AI_NUMERICSERV]
+        , addrFamily = AF_INET
         , addrSocketType = Stream
         }
 
