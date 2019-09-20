@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [Unreleased]
 ### Added
 - Add source IP option to SMTP client
+### Changed
+- Seperate init, delivery, and term portions of SMTP chat
 
 ## [0.5.0] - 2019-02-10
 ### Added

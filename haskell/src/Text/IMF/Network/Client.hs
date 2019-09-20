@@ -3,13 +3,16 @@
 {-# LANGUAGE TupleSections     #-}
 
 module Text.IMF.Network.Client
-  ( Request(..)
+  ( ClientParams(..)
+  , ConnParams(..)
   , TLSParams(..)
   , AuthParams(..)
   , ClientLog
-  , MX(..)
-  , ClientState(..)
+  , Client(..)
+  , Envelope(..)
+  , newClient
   , deliver
+  , termClient
   , runChat
   , connect
   , greeting
@@ -62,6 +65,14 @@ import qualified Text.IMF.Network.Connection as Connection
 import           Text.IMF.Network.Errors     (ClientException (..))
 import           Text.IMF.Parsers.Client     (pReply)
 
+-- | Connection parameters
+data ConnParams = ConnParams
+    { connSourceIP        :: Maybe String   -- ^ specify source IP
+    , connRecipientDomain :: String         -- ^ recipient domain
+    , connProxyHosts      :: Maybe [String] -- ^ proxy hosts, skips recipient domain lookup
+    }
+  deriving (Show, Eq)
+
 -- | Opportunistic TLS parameters
 data TLSParams = TLSParams
     { tlsRequired :: Bool -- ^ require TLS?
@@ -77,16 +88,19 @@ data AuthParams = AuthParams
     }
   deriving (Show, Eq)
 
--- | Request parameters
-data Request = Request
-    { reqClientName  :: ByteString       -- ^ client name
-    , reqSourceIP    :: Maybe String     -- ^ source IP address
-    , reqTargetHosts :: Maybe [String]   -- ^ target hosts
-    , reqTLS         :: Maybe TLSParams  -- ^ opportunistic TLS
-    , reqAuth        :: Maybe AuthParams -- ^ authentication
-    , reqSender      :: Mailbox          -- ^ sender
-    , reqRecipient   :: Mailbox          -- ^ recipient
-    , reqMessage     :: LB.ByteString    -- ^ message
+-- | Client parameters
+data ClientParams = ClientParams
+    { clientName :: ByteString       -- ^ client name
+    , connParams :: ConnParams       -- ^ connection parameters
+    , tlsParams  :: Maybe TLSParams  -- ^ opportunistic tls parameters
+    , authParams :: Maybe AuthParams -- ^ authentication parameters
+    }
+  deriving (Show, Eq)
+
+-- | Message envelope
+data Envelope = Envelope
+    { sender    :: Mailbox -- ^ sender
+    , recipient :: Mailbox -- ^ recipient
     }
   deriving (Show, Eq)
 
@@ -96,93 +110,112 @@ data LogEntryType = Send | Recv | Both
 -- | SMTP chat log
 type ClientLog = [(UTCTime, LogEntryType, ByteString)]
 
--- | Mail exchange server details
-data MX = MX
-    { mxHostname   :: String               -- ^ hostname
-    , mxIP         :: String               -- ^ ip address
-    , mxPort       :: String               -- ^ port
-    , mxExtentions :: [(String, [String])] -- ^ a list of supported extensions and parameters
+-- | SMTP chat client
+data Client = Client
+    { connection  :: Maybe Connection          -- ^ mx server connection
+    , hostname    :: String                    -- ^ mx server hostname
+    , extensions  :: [(String, [String])]      -- ^ a list of supported extensions and parameters
+    , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
+    , lastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
+    , lastErrors  :: [ClientException]         -- ^ any errors encountered
     }
-  deriving (Show, Eq)
+  deriving (Show)
 
--- | SMTP chat state
-data ClientState = ClientState
-    { connection      :: Maybe Connection          -- ^ mx server connection
-    , mxServer        :: Maybe MX                  -- ^ mx server details
-    , respLastCommand :: Maybe LB.ByteString       -- ^ the last command sent
-    , respLastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
-    , respLastErrors  :: [ClientException]         -- ^ any errors encountered
-    }
-  deriving (Show, Eq)
-
-instance Default ClientState where
-    def = ClientState
-        { connection      = Nothing
-        , mxServer        = Nothing
-        , respLastCommand = Nothing
-        , respLastReply   = Nothing
-        , respLastErrors  = []
+instance Default Client where
+    def = Client
+        { connection  = Nothing
+        , hostname    = ""
+        , extensions  = []
+        , lastCommand = Nothing
+        , lastReply   = Nothing
+        , lastErrors  = []
         }
+
+newClient :: ClientParams -- ^ client parameters
+          -> IO (Client, ClientLog)
+newClient clientParams =
+    initClient clientParams $ Client
+        { connection  = Nothing
+        , hostname    = ""
+        , extensions  = []
+        , lastCommand = Nothing
+        , lastReply   = Nothing
+        , lastErrors  = []
+        }
+
+-- | Initialize a client
+--
+-- Gets a client ready for sending by performing the connection, greeting,
+-- hello, auth, and starttls commands. This should only be run once per client
+-- and must be completed before attempting to deliver any messages.
+--
+initClient :: ClientParams -- ^ client parameters
+           -> Client       -- ^ client
+           -> IO (Client, ClientLog)
+initClient (ClientParams clientName connParams tlsParams authParams) =
+    runChat $ do
+        connect connParams
+        greeting
+        hello clientName
+        startTLS clientName tlsParams
+        auth authParams
 
 -- | Deliver a message
 --
--- Deliver a message according to the request parameters and return a tuple
--- of the final chat state and chat log. Any IO error will terminate the chat
--- early and be saved to the chat state.
+-- Deliver a message by performing the mail from, recipient to, and data
+-- commands. This may be run many times per client but the exact number allowed
+-- depends on the receiving MX server.
 --
--- The sender and recipient parameters shouldn't be confused with the from and
--- to/cc/bcc addresses in the message. The sender here is the envelope return
--- path which may differ from the message's from address. Similarly, the
--- envelope recipient might not even be included in the message's to/CC/BCC
--- addresses.
+-- The envelope sender and recipient here may differ from the message from and
+-- to/cc/bcc headers for a variety of reasons. Also, the message body is sent
+-- verbatim so any required modifications like message signing or masking BCC
+-- addresses should be done before calling `deliver`.
 --
--- The message parameter is sent verbatim so any required modifications like
--- adding DKIM headers or masking BCC addresses should be done before calling
--- `deliver`.
---
-deliver :: Request -- ^ request
-        -> IO (ClientState, ClientLog)
-deliver req = runChat chat req def
-  where
-    chat = do
-        connect
-        greeting
-        hello
-        startTLS
-        auth
-        mailFrom
-        rcptTo
+deliver :: Envelope      -- ^ envelope
+        -> LB.ByteString -- ^ body
+        -> Client        -- ^ client
+        -> IO (Client, ClientLog)
+deliver (Envelope sender recipeint) body =
+    runChat $ do
+        mailFrom sender
+        rcptTo recipeint
         dataInit
-        dataBlock
+        dataBlock body
         dataTerm
+
+-- | Terminate a client
+--
+-- Closes a client gracefully by sending the quit command. This should only be
+-- run once per client and only after all message deliveries are complete.
+--
+termClient :: Client -- ^ client
+           -> IO (Client, ClientLog)
+termClient =
+    runChat $ do
         quit
         disconnect
 
 -- | SMTP chat monad
-type Chat = ExceptT [ClientException] (RWST Request ClientLog ClientState IO)
+type Chat = ExceptT [ClientException] (RWST () ClientLog Client IO)
 
 -- | Unwrap a SMTP chat monad into an IO action
-runChat :: Chat ()     -- ^ chat monad
-        -> Request     -- ^ request
-        -> ClientState -- ^ initial chat state
-        -> IO (ClientState, ClientLog)
-runChat f = execRWST (runExceptT $ f `catchError` handleError)
+runChat :: Chat () -- ^ chat monad
+        -> Client  -- ^ client
+        -> IO (Client, ClientLog)
+runChat f = execRWST (runExceptT $ f `catchError` handleError) ()
   where
-    handleError es = modify $ \s -> s { respLastErrors = es }
+    handleError es = modify $ \s -> s { lastErrors = es }
 
 -- | Lookup and connect to the MX server
-connect :: Chat ()
-connect = do
-    srcIP <- asks reqSourceIP
-    targetHosts <- asks reqTargetHosts
-    recipientDomain <- mboxDomain <$> asks reqRecipient
-    hosts <- maybe (liftChat $ resolveMX recipientDomain) return targetHosts
+connect :: ConnParams -> Chat ()
+connect (ConnParams srcIP recipientDomain proxyHosts) = do
+    hosts <- maybe (liftChat $ resolveMX recipientDomain) return proxyHosts
     foldl (<|>) empty $ with hosts $ \host ->
         foldl (<|>) empty $ with ports $ \port -> do
             dstIP <- liftChat $ resolveA host
             conn <- liftChat $ Connection.open srcIP dstIP port
             modify $ \s -> s { connection = Just conn
-                             , mxServer = Just $ MX host dstIP port []
+                             , hostname   = host
                              }
             return ()
   where
@@ -216,32 +249,29 @@ greeting = do
     return ()
 
 -- | Send the HELO command
-helo :: Chat ()
-helo = do
-    clientName <- asks reqClientName
+helo :: ByteString -> Chat ()
+helo clientName = do
     talk $ LB.fromStrict $ "HELO " `B.append` clientName `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the EHLO command
-ehlo :: Chat ()
-ehlo = do
-    clientName <- asks reqClientName
+ehlo :: ByteString -> Chat ()
+ehlo clientName = do
     talk $ LB.fromStrict $ "EHLO " `B.append` clientName `B.append` "\r\n"
     r <- listen 300
-    saveExtentions r
+    saveExtensions r
     return ()
 
 -- | Try to send the EHLO command, fallback to HELO if necessary
-hello :: Chat ()
-hello = ehlo `catchError` const helo
+hello :: ByteString -> Chat ()
+hello clientName = (ehlo clientName) `catchError` const (helo clientName)
 
 -- | Send the STARTTLS command and negotiate TLS context
-startTLS :: Chat ()
-startTLS = do
+startTLS :: ByteString -> Maybe TLSParams -> Chat ()
+startTLS clientName tlsParams = do
     conn <- fromJust <$> gets connection
-    tlsServerParams <- lookup "starttls" . mxExtentions . fromJust <$> gets mxServer
-    tlsParams <- asks reqTLS
+    tlsServerParams <- lookup "starttls" <$> gets extensions
     case (tlsParams, tlsServerParams) of
         (Nothing, _) -> return ()
         (Just (TLSParams _ isValidated), Just _) -> do
@@ -249,22 +279,21 @@ startTLS = do
             talk "STARTTLS\r\n"
             _ <- listen 120
             -- negotiate TLS context
-            hostname <- mxHostname . fromJust <$> gets mxServer
+            hostname <- gets hostname
             conn' <- liftChat $ Connection.negotiateTLS conn hostname isValidated
             now <- liftChat getCurrentTime
             tell [(now, Both, "[negotiate tls]r\n")]
             modify $ \s -> s { connection = Just conn' }
             -- test TLS context by re-issuing hello
-            hello
+            hello clientName
         (Just (TLSParams isRequired _), Nothing)
             | isRequired -> throwError [TLSNotSupported]
             | otherwise  -> return ()
 
-auth :: Chat ()
-auth = do
+auth :: Maybe AuthParams -> Chat ()
+auth authParams = do
     conn <- fromJust <$> gets connection
-    authServerParams <- lookup "auth" . mxExtentions . fromJust <$> gets mxServer
-    authParams <- asks reqAuth
+    authServerParams <- lookup "auth" <$> gets extensions
     case (authParams, authServerParams) of
         (Nothing, _) -> return ()
         (Just (AuthParams _ user pass), Just methods)
@@ -288,17 +317,15 @@ auth = do
             | otherwise  -> return ()
 
 -- | Send the MAIL FROM command
-mailFrom :: Chat ()
-mailFrom = do
-    sender <- asks reqSender
+mailFrom :: Mailbox -> Chat ()
+mailFrom sender = do
     talk $ LB.fromStrict $ "MAIL FROM: " `B.append` C.pack (mboxAngleAddr sender) `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the RCPT TO command
-rcptTo :: Chat ()
-rcptTo = do
-    recipient <- asks reqRecipient
+rcptTo :: Mailbox -> Chat ()
+rcptTo recipient = do
     talk $ LB.fromStrict $ "RCPT TO: " `B.append` C.pack (mboxAngleAddr recipient) `B.append` "\r\n"
     _ <- listen 300
     return ()
@@ -311,9 +338,8 @@ dataInit = do
     return ()
 
 -- | Send the data block
-dataBlock :: Chat ()
-dataBlock = do
-    msg <- asks reqMessage
+dataBlock :: LB.ByteString -> Chat ()
+dataBlock msg = do
     whisper $ msg `LB.append` "\r\n"
     return ()
 
@@ -335,8 +361,8 @@ quit = do
 disconnect :: Chat ()
 disconnect = do
     conn <- fromJust <$> gets connection
-    liftChat $ Connection.close conn
-    modify $ \s -> s { connection = Nothing }
+    conn' <- liftChat $ Connection.close conn
+    modify $ \s -> s { connection = Just conn' }
     return ()
 
 -- | Send and log the command
@@ -348,8 +374,8 @@ talk msg = do
     _ <- liftChat $ Connection.send conn msg
     now <- liftChat getCurrentTime
     tell $ map (now, Send, ) $ LB.toChunks msg
-    modify $ \s -> s { respLastCommand = Just msg
-                     , respLastReply   = Nothing
+    modify $ \s -> s { lastCommand = Just msg
+                     , lastReply   = Nothing
                      }
     return ()
 
@@ -362,8 +388,8 @@ whisper msg = do
     _ <- liftChat $ Connection.send conn msg
     now <- liftChat getCurrentTime
     tell [(now, Send, "[...]\r\n")]
-    modify $ \s -> s { respLastCommand = Nothing
-                     , respLastReply   = Nothing
+    modify $ \s -> s { lastCommand = Nothing
+                     , lastReply   = Nothing
                      }
     return ()
 
@@ -387,7 +413,7 @@ listen secs = do
                     Partial parseF' -> listen' timeoutF parseF'
                     Done _ reply    -> do
                         checkRC reply
-                        modify $ \s -> s { respLastReply = Just reply }
+                        modify $ \s -> s { lastReply = Just reply }
                         return reply
     checkRC :: (Int, [ByteString]) -> Chat ()
     checkRC (rcode, _)
@@ -403,13 +429,12 @@ listen secs = do
         | secs <= 0 = return Nothing
         | otherwise = timeout (ceiling $ 1000000 * secs) f
 
--- | Save supported extentions
-saveExtentions :: (Int, [ByteString]) -- ^ reply
+-- | Save supported extensions
+saveExtensions :: (Int, [ByteString]) -- ^ reply
                -> Chat ()
-saveExtentions (_, rtext) = do
+saveExtensions (_, rtext) = do
     let es = map ((\(w:ws) -> (w, ws)) . words . map toLower . C.unpack) $ drop 1 rtext
-    mxServer <- fromJust <$> gets mxServer
-    modify $ \s -> s { mxServer = Just $ mxServer { mxExtentions = es } }
+    modify $ \s -> s { extensions = es }
     return ()
 
 -- | Lift an IO action into the Chat monad, re-throwing any ClientException
