@@ -34,11 +34,10 @@ import           Control.Exception           (catch, throwIO)
 import           Control.Monad               (unless)
 import           Control.Monad.Except        (ExceptT, catchError, liftEither,
                                               runExceptT, throwError)
-import           Control.Monad.Reader        (MonadReader, asks)
 import           Control.Monad.RWS           (RWST, execRWST)
-import           Control.Monad.State         (MonadState, gets, modify)
+import           Control.Monad.State         (gets, modify)
 import           Control.Monad.Trans         (liftIO)
-import           Control.Monad.Writer        (MonadWriter, tell)
+import           Control.Monad.Writer        (tell)
 import           Data.Attoparsec.ByteString  (IResult (..), parse)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
@@ -46,20 +45,18 @@ import qualified Data.ByteString.Base64      as B64
 import qualified Data.ByteString.Char8       as C
 import qualified Data.ByteString.Lazy        as LB
 import           Data.Char                   (toLower)
-import           Data.Default.Class          (Default, def)
 import           Data.List                   (sortOn)
 import           Data.Maybe                  (fromJust)
 import           Data.Time.Clock             (NominalDiffTime, UTCTime,
                                               addUTCTime, diffUTCTime,
                                               getCurrentTime)
 import           Network.DNS.Lookup          (lookupA, lookupMX)
-import           Network.DNS.Resolver        (Resolver, defaultResolvConf,
-                                              makeResolvSeed, withResolver)
+import           Network.DNS.Resolver        (defaultResolvConf, makeResolvSeed,
+                                              withResolver)
 import           System.Timeout              (timeout)
 
 
-import           Text.IMF.Format             (formatMessage)
-import           Text.IMF.Mailbox            (Mailbox (..), mboxAngleAddr)
+import           Text.IMF.Mailbox            (Mailbox, mboxAngleAddr)
 import           Text.IMF.Network.Connection (Connection)
 import qualified Text.IMF.Network.Connection as Connection
 import           Text.IMF.Network.Errors     (ClientException (..))
@@ -120,16 +117,6 @@ data Client = Client
     , lastErrors  :: [ClientException]         -- ^ any errors encountered
     }
   deriving (Show)
-
-instance Default Client where
-    def = Client
-        { connection  = Nothing
-        , hostname    = ""
-        , extensions  = []
-        , lastCommand = Nothing
-        , lastReply   = Nothing
-        , lastErrors  = []
-        }
 
 newClient :: ClientParams -- ^ client parameters
           -> IO (Client, ClientLog)
@@ -206,6 +193,10 @@ runChat f = execRWST (runExceptT $ f `catchError` handleError) ()
   where
     handleError es = modify $ \s -> s { lastErrors = es }
 
+-- | Lift an IO action into the Chat monad, re-throwing any ClientException
+liftChat :: IO a -> Chat a
+liftChat f = liftIO (fmap Right f `catch` \e -> return $ Left [e]) >>= liftEither
+
 -- | Lookup and connect to the MX server
 connect :: ConnParams -> Chat ()
 connect (ConnParams srcIP recipientDomain proxyHosts) = do
@@ -251,16 +242,17 @@ greeting = do
 -- | Send the HELO command
 helo :: ByteString -> Chat ()
 helo clientName = do
-    talk $ LB.fromStrict $ "HELO " `B.append` clientName `B.append` "\r\n"
+    say $ LB.fromStrict $ "HELO " `B.append` clientName `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the EHLO command
 ehlo :: ByteString -> Chat ()
 ehlo clientName = do
-    talk $ LB.fromStrict $ "EHLO " `B.append` clientName `B.append` "\r\n"
-    r <- listen 300
-    saveExtensions r
+    say $ LB.fromStrict $ "EHLO " `B.append` clientName `B.append` "\r\n"
+    (rcode, rtext) <- listen 300
+    let exts = map ((\(w:ws) -> (w, ws)) . words . map toLower . C.unpack) $ drop 1 rtext
+    modify $ \s -> s { extensions = exts }
     return ()
 
 -- | Try to send the EHLO command, fallback to HELO if necessary
@@ -276,7 +268,7 @@ startTLS clientName tlsParams = do
         (Nothing, _) -> return ()
         (Just (TLSParams _ isValidated), Just _) -> do
             -- issue command and wait for response
-            talk "STARTTLS\r\n"
+            say "STARTTLS\r\n"
             _ <- listen 120
             -- negotiate TLS context
             hostname <- gets hostname
@@ -299,7 +291,7 @@ auth authParams = do
         (Just (AuthParams _ user pass), Just methods)
             | "login" `elem` methods -> do
                 unless (Connection.isTLS conn) $ throwError [AuthNotEncrypted]
-                talk "AUTH LOGIN\r\n"
+                say "AUTH LOGIN\r\n"
                 _ <- listen 120
                 whisper $ LB.fromStrict $ B64.encode (C.pack user) `B.append` "\r\n"
                 _ <- listen 120
@@ -319,21 +311,21 @@ auth authParams = do
 -- | Send the MAIL FROM command
 mailFrom :: Mailbox -> Chat ()
 mailFrom sender = do
-    talk $ LB.fromStrict $ "MAIL FROM: " `B.append` C.pack (mboxAngleAddr sender) `B.append` "\r\n"
+    say $ LB.fromStrict $ "MAIL FROM: " `B.append` C.pack (mboxAngleAddr sender) `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the RCPT TO command
 rcptTo :: Mailbox -> Chat ()
 rcptTo recipient = do
-    talk $ LB.fromStrict $ "RCPT TO: " `B.append` C.pack (mboxAngleAddr recipient) `B.append` "\r\n"
+    say $ LB.fromStrict $ "RCPT TO: " `B.append` C.pack (mboxAngleAddr recipient) `B.append` "\r\n"
     _ <- listen 300
     return ()
 
 -- | Send the DATA command
 dataInit :: Chat ()
 dataInit = do
-    talk "DATA\r\n"
+    say "DATA\r\n"
     _ <- listen 120
     return ()
 
@@ -346,14 +338,14 @@ dataBlock msg = do
 -- | Terminate the data block
 dataTerm :: Chat ()
 dataTerm = do
-    talk ".\r\n"
+    say ".\r\n"
     _ <- listen 600
     return ()
 
 -- | Send the QUIT command
 quit :: Chat ()
 quit = do
-    talk "QUIT\r\n"
+    say "QUIT\r\n"
     _ <- listen 120
     return ()
 
@@ -366,10 +358,10 @@ disconnect = do
     return ()
 
 -- | Send and log the command
-{-# ANN talk ("HLint: ignore Reduce duplication" :: String) #-}
-talk :: LB.ByteString -- ^ command
-     -> Chat ()
-talk msg = do
+{-# ANN say ("HLint: ignore Reduce duplication" :: String) #-}
+say :: LB.ByteString -- ^ command
+    -> Chat ()
+say msg = do
     conn <- fromJust <$> gets connection
     _ <- liftChat $ Connection.send conn msg
     now <- liftChat getCurrentTime
@@ -428,16 +420,4 @@ listen secs = do
     timeoutIn secs f
         | secs <= 0 = return Nothing
         | otherwise = timeout (ceiling $ 1000000 * secs) f
-
--- | Save supported extensions
-saveExtensions :: (Int, [ByteString]) -- ^ reply
-               -> Chat ()
-saveExtensions (_, rtext) = do
-    let es = map ((\(w:ws) -> (w, ws)) . words . map toLower . C.unpack) $ drop 1 rtext
-    modify $ \s -> s { extensions = es }
-    return ()
-
--- | Lift an IO action into the Chat monad, re-throwing any ClientException
-liftChat :: IO a -> Chat a
-liftChat f = liftIO (fmap Right f `catch` \e -> return $ Left [e]) >>= liftEither
 

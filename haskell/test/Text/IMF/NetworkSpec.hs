@@ -14,8 +14,7 @@ import           Network.Socket              (AddrInfo (..), AddrInfoFlag (..),
                                               Socket, SocketOption (..),
                                               SocketType (..), accept, bind,
                                               close, defaultHints, getAddrInfo,
-                                              listen, setSocketOption, socket,
-                                              socketPort)
+                                              listen, setSocketOption, socket)
 import qualified Network.Socket              as Socket hiding (recv, send)
 import qualified Network.Socket.ByteString   as Socket
 import qualified Network.TLS                 as TLS
@@ -30,6 +29,16 @@ import           Text.IMF.Message
 import           Text.IMF.Network.Client
 import           Text.IMF.Network.Connection (Connection)
 import qualified Text.IMF.Network.Connection as Connection
+
+testClient :: Client
+testClient = Client
+    { connection  = Nothing
+    , hostname    = ""
+    , extensions  = []
+    , lastCommand = Nothing
+    , lastReply   = Nothing
+    , lastErrors  = []
+    }
 
 testClientName :: ByteString
 testClientName = "relay.example.com"
@@ -107,7 +116,7 @@ spec = do
                     _ <- Socket.send sock "220 smtp.example.com ESMTP Postfix\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> greeting >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> greeting >> disconnect) testClient
                     lastCommand s `shouldBe` Nothing
                     lastReply s `shouldBe` Just (220, ["smtp.example.com ESMTP Postfix"])
                     lastErrors s `shouldBe` []
@@ -121,7 +130,7 @@ spec = do
                     _ <- Socket.send sock "250-smtp.example.com\r\n250-SIZE 14680064\r\n250-PIPELINING\r\n250 HELP\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> disconnect) testClient
                     extensions s `shouldBe` [("size",["14680064"]),("pipelining",[]),("help",[])]
                     lastCommand s `shouldBe` Just "EHLO relay.example.com\r\n"
                     lastReply s `shouldBe` Just (250, ["smtp.example.com", "SIZE 14680064", "PIPELINING", "HELP"])
@@ -140,7 +149,7 @@ spec = do
                     _ <- Socket.send sock "250 smtp.example.com, I am glad to meet you\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> disconnect) testClient
                     extensions s `shouldBe` []
                     lastCommand s `shouldBe` Just "HELO relay.example.com\r\n"
                     lastReply s `shouldBe` Just (250, ["smtp.example.com, I am glad to meet you"])
@@ -170,7 +179,7 @@ spec = do
                     _ <- TLS.sendData ctx "250-smtp.example.com\r\n250 STARTTLS\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> disconnect) testClient
                     extensions s `shouldBe` [("starttls",[])]
                     lastCommand s `shouldBe` Just "EHLO relay.example.com\r\n"
                     lastReply s `shouldBe` Just (250, ["smtp.example.com", "STARTTLS"])
@@ -209,7 +218,7 @@ spec = do
                     _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> auth testAuthParams >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> auth testAuthParams >> disconnect) testClient
                     extensions s `shouldBe` [("starttls",[]),("auth",["login"])]
                     lastCommand s `shouldBe` Nothing
                     lastReply s `shouldBe` Just (235, ["Authentication successful."])
@@ -250,7 +259,7 @@ spec = do
                     _ <- TLS.sendData ctx "235 Authentication successful.\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> auth testAuthParams >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> hello testClientName >> startTLS testClientName testTLSParams >> auth testAuthParams >> disconnect) testClient
                     extensions s `shouldBe` [("starttls",[]),("auth",["plain"])]
                     lastCommand s `shouldBe` Nothing
                     lastReply s `shouldBe` Just (235, ["Authentication successful."])
@@ -274,7 +283,7 @@ spec = do
                     _ <- Socket.send sock "250 Ok\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> mailFrom (Mailbox "" "jdoe" "localhost") >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> mailFrom (Mailbox "" "jdoe" "localhost") >> disconnect) testClient
                     lastCommand s `shouldBe` Just "MAIL FROM: <jdoe@localhost>\r\n"
                     lastReply s `shouldBe` Just (250, ["Ok"])
                     lastErrors s `shouldBe` []
@@ -290,7 +299,7 @@ spec = do
                     _ <- Socket.send sock "250 Ok\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> rcptTo (Mailbox "" "mary" "localhost") >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> rcptTo (Mailbox "" "mary" "localhost") >> disconnect) testClient
                     lastCommand s `shouldBe` Just "RCPT TO: <mary@localhost>\r\n"
                     lastReply s `shouldBe` Just (250, ["Ok"])
                     lastErrors s `shouldBe` []
@@ -306,7 +315,7 @@ spec = do
                     _ <- Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> dataInit >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> dataInit >> disconnect) testClient
                     lastCommand s `shouldBe` Just "DATA\r\n"
                     lastReply s `shouldBe` Just (354, ["End data with <CR><LF>.<CR><LF>"])
                     lastErrors s `shouldBe` []
@@ -322,7 +331,7 @@ spec = do
                     return ()
                 clientAct = do
                     body <- LB.readFile "haskell/test/Fixtures/Messages/simple_addressing_1.txt"
-                    (s, chatLog) <- runChat (connect testConnParams >> dataBlock body >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> dataBlock body >> disconnect) testClient
                     lastCommand s `shouldBe` Nothing
                     lastReply s `shouldBe` Nothing
                     lastErrors s `shouldBe` []
@@ -336,7 +345,7 @@ spec = do
                     _ <- Socket.send sock "250 Ok: queued as 12345\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> dataTerm >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> dataTerm >> disconnect) testClient
                     lastCommand s `shouldBe` Just ".\r\n"
                     lastReply s `shouldBe` Just (250, ["Ok: queued as 12345"])
                     lastErrors s `shouldBe` []
@@ -352,7 +361,7 @@ spec = do
                     _ <- Socket.send sock "221 Bye\r\n"
                     return ()
                 clientAct = do
-                    (s, chatLog) <- runChat (connect testConnParams >> quit >> disconnect) def
+                    (s, chatLog) <- runChat (connect testConnParams >> quit >> disconnect) testClient
                     lastCommand s `shouldBe` Just "QUIT\r\n"
                     lastReply s `shouldBe` Just (221, ["Bye"])
                     lastErrors s `shouldBe` []
@@ -382,7 +391,9 @@ spec = do
                 clientAct = do
                     body <- LB.readFile "haskell/test/Fixtures/Messages/simple_addressing_1.txt"
                     (s, chatLog1) <- newClient testClientParams
+                    lastErrors s `shouldBe` []
                     (s, chatLog2) <- deliver (Envelope (Mailbox "" "jdoe" "localhost") (Mailbox "" "mary" "localhost")) body s
+                    lastErrors s `shouldBe` []
                     (s, chatLog3) <- termClient s
                     extensions s `shouldBe` [("size",["14680064"]),("pipelining",[]),("help",[])]
                     lastCommand s `shouldBe` Just "QUIT\r\n"
