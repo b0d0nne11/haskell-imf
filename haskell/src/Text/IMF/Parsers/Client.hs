@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Text.IMF.Parsers.Client
-  ( pReply
+  ( pBody
+  , pReply
   )
 where
 
@@ -12,17 +13,24 @@ import           Control.Applicative              ( (<|>)
                                                   , liftA3
                                                   , many
                                                   )
-import           Data.Attoparsec.ByteString       ( Parser
+import           Data.Attoparsec.ByteString.Char8 ( Parser
+                                                  , anyChar
+                                                  , manyTill
+                                                  , satisfy
+                                                  , string
+                                                  , takeWhile
                                                   , try
                                                   )
-import           Data.Attoparsec.ByteString.Char8 ( satisfy
-                                                  , takeWhile
-                                                  , string
+import           Data.ByteString.Char8            ( ByteString
+                                                  , pack
                                                   )
-import           Data.ByteString                  ( ByteString )
 import           Data.Char                        ( isDigit
                                                   , isPrint
                                                   )
+
+-- | Parser for SMTP message body
+pBody :: Parser ByteString
+pBody = fmap pack $ manyTill anyChar $ string "\r\n.\r\n"
 
 -- | Parser for SMTP reply
 pReply :: Parser (Int, [ByteString])

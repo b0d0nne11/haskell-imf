@@ -5,6 +5,7 @@ module Text.IMF.NetworkSpec where
 import           Control.Concurrent          (forkIO)
 import           Control.Concurrent.MVar     (newEmptyMVar, putMVar, takeMVar)
 import           Control.Exception           (bracket)
+import           Data.Attoparsec.ByteString.Char8 (Parser, parse, IResult(..), Result)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Char8       as C
@@ -22,13 +23,21 @@ import qualified Network.TLS.Extra.Cipher    as TLS
 import qualified Network.TLS.Extra.FFDHE     as TLS
 import           Test.Hspec
 
-import           Text.IMF.Format
 import           Text.IMF.Header
 import           Text.IMF.Mailbox
 import           Text.IMF.Message
 import           Text.IMF.Network.Client
 import           Text.IMF.Network.Connection (Connection)
 import qualified Text.IMF.Network.Connection as Connection
+import           Text.IMF.Parsers.Client
+
+recvAll :: IO ByteString -> (ByteString -> Result a) -> IO a
+recvAll recv parse = do
+    chunk <- recv
+    case parse chunk of
+        Done _ a       -> return a
+        Fail{}         -> fail "bad response format"
+        Partial parse' -> recvAll recv parse'
 
 testClient :: Client
 testClient = Client
@@ -382,8 +391,7 @@ spec = do
                     _ <- Socket.send sock "250 Ok\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "DATA\r\n"
                     _ <- Socket.send sock "354 End data with <CR><LF>.<CR><LF>\r\n"
-                    _ <- Socket.recv sock 4096
-                    _ <- Socket.recv sock 4096 `shouldReturn` ".\r\n"
+                    _ <- recvAll (Socket.recv sock 4096) (parse pBody)
                     _ <- Socket.send sock "250 Ok: queued as 12345\r\n"
                     _ <- Socket.recv sock 4096 `shouldReturn` "QUIT\r\n"
                     _ <- Socket.send sock "221 Bye\r\n"
