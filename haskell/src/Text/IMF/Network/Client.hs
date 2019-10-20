@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE TupleSections     #-}
 
 module Text.IMF.Network.Client
@@ -11,8 +12,9 @@ module Text.IMF.Network.Client
   , Client(..)
   , Envelope(..)
   , newClient
+  , getClient
   , deliver
-  , termClient
+  , closeClient
   , runChat
   , connect
   , greeting
@@ -31,14 +33,14 @@ where
 
 import           Control.Applicative         (empty, (<|>))
 import           Control.Exception           (catch, throwIO)
-import           Control.Monad               (unless)
+import           Control.Monad               (unless, when)
 import           Control.Monad.Except        (ExceptT, catchError, liftEither,
                                               runExceptT, throwError)
 import           Control.Monad.RWS           (RWST, execRWST)
 import           Control.Monad.State         (gets, modify)
 import           Control.Monad.Trans         (liftIO)
 import           Control.Monad.Writer        (tell)
-import           Data.Attoparsec.ByteString  (IResult (..), parse)
+import           Data.Attoparsec.ByteString  (Result, IResult (..), parse)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Base64      as B64
@@ -109,43 +111,50 @@ type ClientLog = [(UTCTime, LogEntryType, ByteString)]
 
 -- | SMTP chat client
 data Client = Client
-    { connection  :: Maybe Connection          -- ^ mx server connection
-    , hostname    :: String                    -- ^ mx server hostname
-    , extensions  :: [(String, [String])]      -- ^ a list of supported extensions and parameters
-    , lastCommand :: Maybe LB.ByteString       -- ^ the last command sent
-    , lastReply   :: Maybe (Int, [ByteString]) -- ^ the last reply received
-    , lastErrors  :: [ClientException]         -- ^ any errors encountered
+    { connection   :: Maybe Connection          -- ^ mx server connection
+    , hostname     :: String                    -- ^ mx server hostname
+    , extensions   :: [(String, [String])]      -- ^ a list of supported extensions and parameters
+    , lastCommand  :: Maybe LB.ByteString       -- ^ the last command sent
+    , lastReply    :: Maybe (Int, [ByteString]) -- ^ the last reply received
+    , lastErrors   :: [ClientException]         -- ^ any errors encountered
+    , createdAt    :: UTCTime                   -- ^ client was created at
+    , messagesSent :: Int                       -- ^ number of messages delivered
     }
   deriving (Show)
 
-newClient :: ClientParams -- ^ client parameters
-          -> IO (Client, ClientLog)
-newClient clientParams =
-    initClient clientParams $ Client
-        { connection  = Nothing
-        , hostname    = ""
-        , extensions  = []
-        , lastCommand = Nothing
-        , lastReply   = Nothing
-        , lastErrors  = []
+newClient :: IO Client
+newClient = do
+    now <- getCurrentTime
+    return $ Client
+        { connection   = Nothing
+        , hostname     = ""
+        , extensions   = []
+        , lastCommand  = Nothing
+        , lastReply    = Nothing
+        , lastErrors   = []
+        , createdAt    = now
+        , messagesSent = 0
         }
 
--- | Initialize a client
---
--- Gets a client ready for sending by performing the connection, greeting,
--- hello, auth, and starttls commands. This should only be run once per client
--- and must be completed before attempting to deliver any messages.
---
-initClient :: ClientParams -- ^ client parameters
-           -> Client       -- ^ client
-           -> IO (Client, ClientLog)
-initClient (ClientParams clientName connParams tlsParams authParams) =
+setupClient :: ClientParams -- ^ client parameters
+            -> Client       -- ^ client
+            -> IO (Client, ClientLog)
+setupClient ClientParams{..} =
     runChat $ do
         connect connParams
         greeting
         hello clientName
         startTLS clientName tlsParams
         auth authParams
+
+-- | Get a client
+--
+-- Gets a client thats ready for sending by performing the connection, greeting,
+-- hello, optional starttls, and optional auth portions of the SMTP chat.
+--
+getClient :: ClientParams -- ^ client parameters
+          -> IO (Client, ClientLog)
+getClient params = newClient >>= setupClient params
 
 -- | Deliver a message
 --
@@ -170,14 +179,14 @@ deliver (Envelope sender recipeint) body =
         dataBlock body
         dataTerm
 
--- | Terminate a client
+-- | Gracefully close a client
 --
 -- Closes a client gracefully by sending the quit command. This should only be
 -- run once per client and only after all message deliveries are complete.
 --
-termClient :: Client -- ^ client
-           -> IO (Client, ClientLog)
-termClient =
+closeClient :: Client -- ^ client
+            -> IO (Client, ClientLog)
+closeClient =
     runChat $ do
         quit
         disconnect
@@ -339,7 +348,8 @@ dataBlock msg = do
 dataTerm :: Chat ()
 dataTerm = do
     say ".\r\n"
-    _ <- listen 600
+    (rcode, _) <- listen 600
+    when (rcode == 250) $ modify $ \s -> s { messagesSent = messagesSent s + 1 }
     return ()
 
 -- | Send the QUIT command
@@ -390,34 +400,29 @@ listen :: NominalDiffTime -- ^ reply timeout
        -> Chat (Int, [ByteString])
 listen secs = do
     deadline <- liftChat $ addUTCTime secs <$> getCurrentTime
-    listen' (timeoutAt deadline) (parse pReply)
+    conn <- fromJust <$> gets connection
+    reply <- getAll deadline (Connection.recv conn) (parse pReply)
+    checkRC reply
+    modify $ \s -> s { lastReply = Just reply }
+    return reply
   where
-    listen' timeoutF parseF = do
-        conn <- fromJust <$> gets connection
-        resp <- liftChat $ timeoutF $ Connection.recv conn
-        case resp of
-            Nothing    -> throwError [ResponseTimeout]
-            Just chunk -> do
-                now <- liftChat getCurrentTime
-                tell [(now, Recv, chunk)]
-                case parseF chunk of
-                    Fail{}          -> throwError [BadResponseFormat]
-                    Partial parseF' -> listen' timeoutF parseF'
-                    Done _ reply    -> do
-                        checkRC reply
-                        modify $ \s -> s { lastReply = Just reply }
-                        return reply
+    getAll :: UTCTime -> IO ByteString -> (ByteString -> Result a) -> Chat a
+    getAll deadline get parse = do
+        chunk <- until deadline get
+        now <- liftChat getCurrentTime
+        tell [(now, Recv, chunk)]
+        case parse chunk of
+            Done _ a       -> return a
+            Fail{}         -> throwError [BadResponseFormat]
+            Partial parse' -> getAll deadline get parse'
+    until :: UTCTime -> IO a -> Chat a
+    until deadline f = do
+        secs <- liftChat $ diffUTCTime deadline <$> getCurrentTime
+        a <- liftChat $ timeout (max 1 $ ceiling $ 1000000 * secs) f
+        maybe (throwError [ResponseTimeout]) return a
     checkRC :: (Int, [ByteString]) -> Chat ()
     checkRC (rcode, _)
         | rcode >= 200 && rcode <= 399 = return ()
         | rcode >= 400 && rcode <= 499 = throwError [TemporaryFailure]
         | otherwise                    = throwError [PermanentFailure]
-    timeoutAt :: UTCTime -> IO a -> IO (Maybe a)
-    timeoutAt deadline f = do
-        secs <- diffUTCTime deadline <$> getCurrentTime
-        timeoutIn secs f
-    timeoutIn :: NominalDiffTime -> IO a -> IO (Maybe a)
-    timeoutIn secs f
-        | secs <= 0 = return Nothing
-        | otherwise = timeout (ceiling $ 1000000 * secs) f
 

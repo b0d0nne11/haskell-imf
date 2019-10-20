@@ -25,6 +25,7 @@ library
                      , Text.IMF.FFI
                      , Text.IMF.Parsers.Client
                      , Text.IMF.Network.Client
+                     , Text.IMF.Network.ClientPool
                      , Text.IMF.Network.Connection
                      , Text.IMF.Network.Errors
   build-depends:       base >= 4.7 && < 5
@@ -40,6 +41,7 @@ library
                      , attoparsec
                      , data-default-class
                      , x509-system
+                     , resource-pool
   ghc-options:
   default-language:    Haskell2010
 

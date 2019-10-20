@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Added
 - Add source IP option to SMTP client
 - Add stack.yaml.lock to change control
+- Add a client pool module
 ### Changed
 - Seperate init, delivery, and term portions of SMTP chat
 
