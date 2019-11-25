@@ -9,8 +9,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Add source IP option to SMTP client
 - Add stack.yaml.lock to change control
 - Add a client pool module
+- Add a server module
 ### Changed
 - Seperate init, delivery, and term portions of SMTP chat
+- Moved all remaining parsers to attoparsec
+- Reorganize project, move top level package to Data and add Types module
+- Move client DNS functions to their own module
+- Changed to the BSD3 license to be more consistant with community packages
+- Cleanup the README
+- Updated LTS snapshot to latest, lts-14.12
+- Move general chat functions to their own module
 
 ## [0.5.0] - 2019-02-10
 ### Added

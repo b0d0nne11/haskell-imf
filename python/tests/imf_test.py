@@ -3,7 +3,7 @@ from pytz import utc
 from nose.tools import ok_, eq_, assert_raises
 
 import imf
-from imf import Mailbox, MailboxList, DateTime, MessageId, HeaderField, Header, Message
+from imf import Mailbox, MailboxList, DateTime, MessageId, Header, HeaderList, Message
 
 
 def setup_module():
@@ -66,20 +66,18 @@ def test_message_id():
         MessageId.parse("")
 
 
-def test_header_field():
-    raw_field = "From: john@example.com\r\n"
-    field = HeaderField.parse(raw_field)
+def test_header():
+    raw_header = "From: john@example.com\r\n"
+    header = Header.parse(raw_header)
 
-    eq_(str(field), raw_field)
-    eq_("From", field.name)
-    eq_("john@example.com", field.value)
+    eq_(str(header), raw_header)
 
     with assert_raises(ValueError):
-        HeaderField.parse("")
+        Header.parse("")
 
 
-def test_header():
-    raw_header = "".join(
+def test_header_list():
+    raw_header_list = "".join(
         [
             "Date: Thu, 13 Sep 1984 00:00:00 -0500\r\n",
             "Message-Id: <1234@example.com>\r\n",
@@ -90,15 +88,15 @@ def test_header():
             "Subject: This is a test!\r\n",
         ]
     )
-    header = Header.parse(raw_header)
+    header_list = HeaderList.parse(raw_header_list)
 
-    eq_(str(header), raw_header)
-    eq_(len(header), 7)
-    eq_(header[0], HeaderField.parse("Date: Thu, 13 Sep 1984 00:00:00 -0500\r\n"))
-    ok_(HeaderField.parse("Message-Id: <1234@example.com>\r\n") in header)
+    eq_(str(header_list), raw_header_list)
+    eq_(len(header_list), 7)
+    eq_(header_list[0], Header.parse("Date: Thu, 13 Sep 1984 00:00:00 -0500\r\n"))
+    ok_(Header.parse("Message-Id: <1234@example.com>\r\n") in header_list)
 
     with assert_raises(ValueError):
-        Header.parse("")
+        HeaderList.parse("")
 
 
 def test_message():
@@ -117,16 +115,7 @@ def test_message():
     message = Message.parse(raw_message)
 
     eq_(str(message), raw_message)
-    eq_(
-        [(f.name, f.value) for f in message.header],
-        [
-            ("From", "John Doe <jdoe@machine.example>"),
-            ("To", "Mary Smith <mary@example.net>"),
-            ("Subject", "Saying Hello"),
-            ("Date", "Fri, 21 Nov 1997 09:55:06 -0600"),
-            ("Message-ID", "<1234@local.machine.example>"),
-        ],
-    )
+    eq_(len(message.headers), 5)
     eq_(message.body, "This is a message just to say hello.\r\nSo, hello.\r\n")
 
     with assert_raises(ValueError):

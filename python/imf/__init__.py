@@ -29,7 +29,7 @@ def not_implemented(*args, **kwargs):
 class HsStablePtr:
 
     parse_fn = not_implemented
-    format_fn = not_implemented
+    show_fn = not_implemented
 
     def __init__(self, ptr: ffi.CData) -> None:
         self._ptr = ptr
@@ -41,7 +41,7 @@ class HsStablePtr:
         return "%s(%r)" % (self.__class__.__name__, self._ptr)
 
     def __str__(self) -> str:
-        return cstring(self.format_fn(self._ptr))
+        return cstring(self.show_fn(self._ptr))
 
     @classmethod
     def parse(cls, raw: str) -> "HsStablePtr":
@@ -81,7 +81,7 @@ class HsStableList(HsStablePtr):
 class Mailbox(HsStableItem):
 
     parse_fn = lib.mailbox_parse
-    format_fn = lib.mailbox_format
+    show_fn = lib.mailbox_show
     equal_fn = lib.mailbox_equals
 
     @classmethod
@@ -114,7 +114,7 @@ class MailboxList(HsStableList):
     item_class = Mailbox
 
     parse_fn = lib.mailbox_list_parse
-    format_fn = lib.mailbox_list_format
+    show_fn = lib.mailbox_list_show
     length_fn = lib.mailbox_list_length
     item_fn = lib.mailbox_list_item
 
@@ -122,7 +122,7 @@ class MailboxList(HsStableList):
 class DateTime(HsStableItem):
 
     parse_fn = lib.datetime_parse
-    format_fn = lib.datetime_format
+    show_fn = lib.datetime_show
     equal_fn = lib.datetime_equals
 
     @classmethod
@@ -152,7 +152,7 @@ class DateTime(HsStableItem):
 class MessageId(HsStableItem):
 
     parse_fn = lib.message_id_parse
-    format_fn = lib.message_id_format
+    show_fn = lib.message_id_show
     equal_fn = lib.message_id_equals
 
     @classmethod
@@ -175,40 +175,32 @@ class MessageId(HsStableItem):
         return cstring(lib.message_id_right(self._ptr))
 
 
-class HeaderField(HsStableItem):
-
-    parse_fn = lib.header_field_parse
-    format_fn = lib.header_field_format
-    equal_fn = lib.header_field_equals
-
-    @property
-    def name(self) -> str:
-        return cstring(lib.header_field_name(self._ptr))
-
-    @property
-    def value(self) -> str:
-        return cstring(lib.header_field_value(self._ptr))
-
-
-class Header(HsStableList):
-
-    item_class = HeaderField
+class Header(HsStableItem):
 
     parse_fn = lib.header_parse
-    format_fn = lib.header_format
-    length_fn = lib.header_length
-    item_fn = lib.header_item
+    show_fn = lib.header_show
+    equal_fn = lib.header_equals
+
+
+class HeaderList(HsStableList):
+
+    item_class = Header
+
+    parse_fn = lib.header_list_parse
+    show_fn = lib.header_list_show
+    length_fn = lib.header_list_length
+    item_fn = lib.header_list_item
 
 
 class Message(HsStableItem):
 
     parse_fn = lib.message_parse
-    format_fn = lib.message_format
+    show_fn = lib.message_show
     equal_fn = lib.message_equals
 
     @property
-    def header(self) -> "Header":
-        return Header(lib.message_header(self._ptr))
+    def headers(self) -> "HeaderList":
+        return HeaderList(lib.message_headers(self._ptr))
 
     @property
     def body(self) -> str:

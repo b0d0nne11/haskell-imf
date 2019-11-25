@@ -1,47 +1,56 @@
 name:                imf
 version:             0.5.0
-synopsis:            Utilities for parsing and manipulating internet messages
+synopsis:            Utilities for parsing, sending, receiving, and manipulating email messages
 homepage:            https://github.com/b0d0nne11/imf
 bug-reports:         https://github.com/b0d0nne11/imf/issues
-license:             Apache
+license:             BSD3
 license-file:        LICENSE
 author:              Brendan O'Donnell <brendan.james.odonnell@gmail.com>
 maintainer:          Brendan O'Donnell <brendan.james.odonnell@gmail.com>
-copyright:           2018 Brendan O'Donnell
-category:            Parsing
+copyright:           2017-2019 Brendan O'Donnell
+category:            Data
 build-type:          Simple
 cabal-version:       >= 1.10
 
 library
   hs-source-dirs:      haskell/src
-  exposed-modules:     Text.IMF
-                     , Text.IMF.DateTime
-                     , Text.IMF.Header
-                     , Text.IMF.Mailbox
-                     , Text.IMF.Message
-                     , Text.IMF.MsgId
-                     , Text.IMF.Primatives
-                     , Text.IMF.Format
-                     , Text.IMF.FFI
-                     , Text.IMF.Parsers.Client
-                     , Text.IMF.Network.Client
-                     , Text.IMF.Network.ClientPool
-                     , Text.IMF.Network.Connection
-                     , Text.IMF.Network.Errors
+  exposed-modules:     Data.IMF
+                     , Data.IMF.FFI
+                     , Data.IMF.Types
+                     , Data.IMF.Network
+                     , Data.IMF.Network.Chat
+                     , Data.IMF.Network.Client
+                     , Data.IMF.Network.ClientPool
+                     , Data.IMF.Network.Connection
+                     , Data.IMF.Network.DNS
+                     , Data.IMF.Network.Errors
+                     , Data.IMF.Network.Server
+                     , Data.IMF.Parsers
+                     , Data.IMF.Parsers.Command
+                     , Data.IMF.Parsers.Core
+                     , Data.IMF.Parsers.DateTime
+                     , Data.IMF.Parsers.Header
+                     , Data.IMF.Parsers.Mailbox
+                     , Data.IMF.Parsers.Message
+                     , Data.IMF.Parsers.MsgId
+                     , Data.IMF.Parsers.Network
   build-depends:       base >= 4.7 && < 5
-                     , parsec
-                     , time
-                     , safe
-                     , network
-                     , tls
-                     , dns
-                     , bytestring
-                     , base64-bytestring
-                     , mtl
                      , attoparsec
                      , data-default-class
-                     , x509-system
+                     , dns
+                     , base64-bytestring
+                     , bytestring
+                     , exceptions
+                     , mtl
+                     , network
                      , resource-pool
+                     , safe
+                     , text
+                     , text-format
+                     , threads
+                     , time
+                     , tls
+                     , x509-system
   ghc-options:
   default-language:    Haskell2010
 
@@ -49,21 +58,27 @@ test-suite imf-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      haskell/test
   main-is:             Spec.hs
-  other-modules:       Text.IMF.HeaderSpec
-                     , Text.IMF.MailboxSpec
-                     , Text.IMF.MessageSpec
-                     , Text.IMF.NetworkSpec
+  other-modules:       Data.IMF.Parsers.CoreSpec
+                     , Data.IMF.Parsers.DateTimeSpec
+                     , Data.IMF.Parsers.HeaderSpec
+                     , Data.IMF.Parsers.MailboxSpec
+                     , Data.IMF.Parsers.MessageSpec
+                     , Data.IMF.Parsers.MsgIdSpec
+                     , Data.IMF.Network.ClientSpec
+                     , Data.IMF.Network.ServerSpec
   build-depends:       base
                      , imf
                      , hspec
                      , hspec-contrib
+                     , attoparsec
+                     , bytestring
+                     , data-default-class
                      , directory
                      , filepath
                      , network
+                     , text
+                     , time
                      , tls
-                     , bytestring
-                     , data-default-class
-                     , attoparsec
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 

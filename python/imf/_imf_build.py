@@ -29,7 +29,7 @@ ffibuilder.set_source(
     libraries=["imf"],
     library_dirs=["/usr/local/lib"],
     include_dirs=[
-        "../../build/Text/IMF",
+        "../../build/Data/IMF",
         f"{os.environ['HOME']}/.stack/programs/x86_64-linux/ghc-tinfo6-8.4.3/lib/ghc-8.4.3/include",
     ],
 )
@@ -44,7 +44,7 @@ ffibuilder.cdef(
     void imf_exit(void);
 
     HsStablePtr mailbox_parse(char *raw);
-    char* mailbox_format(HsStablePtr mbox);
+    char* mailbox_show(HsStablePtr mbox);
     bool mailbox_equals(HsStablePtr mbox1, HsStablePtr mbox2);
     HsStablePtr mailbox_from_parts(char *display, char *local, char *domain);
     char* mailbox_display(HsStablePtr mbox);
@@ -52,39 +52,37 @@ ffibuilder.cdef(
     char* mailbox_domain(HsStablePtr mbox);
 
     HsStablePtr mailbox_list_parse(char *raw);
-    char* mailbox_list_format(HsStablePtr mboxes);
+    char* mailbox_list_show(HsStablePtr mboxes);
     int mailbox_list_length(HsStablePtr mboxes);
     HsStablePtr mailbox_list_item(HsStablePtr mboxes, int key);
 
     HsStablePtr datetime_parse(char *raw);
-    char* datetime_format(HsStablePtr dtime);
+    char* datetime_show(HsStablePtr dtime);
     bool datetime_equals(HsStablePtr dtime1, HsStablePtr dtime2);
     HsStablePtr datetime_from_nanoseconds(long ns, int tzoffset);
     long datetime_nanoseconds(HsStablePtr dtime);
     int datetime_tzoffset(HsStablePtr dtime);
 
     HsStablePtr message_id_parse(char *raw);
-    char* message_id_format(HsStablePtr msgid);
+    char* message_id_show(HsStablePtr msgid);
     bool message_id_equals(HsStablePtr msgid1, HsStablePtr msgid2);
     HsStablePtr message_id_from_parts(char *left, char *right);
     char* message_id_left(HsStablePtr msgid);
     char* message_id_right(HsStablePtr msgid);
 
-    HsStablePtr header_field_parse(char *raw);
-    char* header_field_format(HsStablePtr hf);
-    bool header_field_equals(HsStablePtr hf1, HsStablePtr hf2);
-    char* header_field_name(HsStablePtr hf);
-    char* header_field_value(HsStablePtr hf);
-
     HsStablePtr header_parse(char *raw);
-    char* header_format(HsStablePtr h);
-    int header_length(HsStablePtr h);
-    HsStablePtr header_item(HsStablePtr h, int key);
+    char* header_show(HsStablePtr hf);
+    bool header_equals(HsStablePtr hf1, HsStablePtr hf2);
+
+    HsStablePtr header_list_parse(char *raw);
+    char* header_list_show(HsStablePtr h);
+    int header_list_length(HsStablePtr h);
+    HsStablePtr header_list_item(HsStablePtr h, int key);
 
     HsStablePtr message_parse(char *raw);
-    char* message_format(HsStablePtr msg);
+    char* message_show(HsStablePtr msg);
     bool message_equals(HsStablePtr msg1, HsStablePtr msg2);
-    HsStablePtr message_header(HsStablePtr msg);
+    HsStablePtr message_headers(HsStablePtr msg);
     char* message_body(HsStablePtr msg);
 """
 )
