@@ -7,7 +7,7 @@ clean:
 build-all: build/libimf.so python/imf/_imf.so
 
 test:
-	stack test --pedantic
+	stack test --pedantic --ghc-options -fno-warn-name-shadowing --ghc-options -fno-warn-orphans
 	cd python/ && LD_LIBRARY_PATH=/usr/local/lib nosetests
 
 install: build/libimf.so
@@ -19,8 +19,8 @@ docs:
 python/imf/_imf.so:
 	python/imf/_imf_build.py
 
-build/libimf.so build/Text/IMF/FFI_stub.h:
+build/libimf.so build/Data/IMF/FFI_stub.h:
 	mkdir -p build
-	stack ghc -- -dynamic -shared -fPIC -lHSrts-ghc8.4.3 -outputdir build -o build/libimf.so haskell/src/Text/IMF.hs haskell/src/Text/IMF/*.hs
+	stack ghc -- -dynamic -shared -fPIC -lHSrts-ghc8.4.3 -outputdir build -o build/libimf.so haskell/src/Data/IMF.hs haskell/src/Data/IMF/*.hs haskell/src/Data/IMF/Parsers/*.hs
 
 .PHONY: default clean build-all test install docs
