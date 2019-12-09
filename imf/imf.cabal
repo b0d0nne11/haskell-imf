@@ -1,0 +1,35 @@
+name:                imf
+version:             0.6.0
+synopsis:            Utilities for working with email messages
+homepage:            https://github.com/b0d0nne11/imf
+bug-reports:         https://github.com/b0d0nne11/imf/issues
+license:             BSD3
+license-file:        LICENSE
+author:              Brendan O'Donnell
+maintainer:          brendan@odonnell.xyz
+copyright:           Copyright (c) 2017-2020, Brendan O'Donnell
+category:            Data
+build-type:          Simple
+cabal-version:       >= 1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Data.IMF
+                     , Data.IMF.Command
+                     , Data.IMF.Header
+                     , Data.IMF.Mailbox
+                     , Data.IMF.Message
+                     , Data.IMF.MessageId
+                     , Data.IMF.Time
+                     , Data.IMF.Types
+  build-depends:       base >= 4.7 && < 5
+                     , base36
+                     , random
+                     , text
+                     , time
+  ghc-options:
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/b0d0nne11/imf

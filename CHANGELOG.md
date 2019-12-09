@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+### Added
+- Added PIPELINING, STARTTLS, and AUTH to server
+- Add type classes for objects that have a parser
+- Add helper for generating new message IDs
+- Add helper for building new messages
+### Changed
+- Export addrSpec and domain parsers
+- Merge the Client and ClientPool modules
+- Rename the DateTime modules Time
+- Reorganize project to split it up into seperate pacakges
+- Rewrite tests using tasty to work better with cabal
+
 ## [0.6.0] - 2019-12-02
 ### Added
 - Add source IP option to SMTP client

@@ -1,0 +1,8 @@
+packages: imf
+          imf-network
+          imf-parsers
+
+source-repository-package
+  type: git
+  location: https://github.com/b0d0nne11/base36.git
+  tag: 1a0a4fa8462be59e64684c2c4e8febe288249607

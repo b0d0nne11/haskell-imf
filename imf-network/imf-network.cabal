@@ -1,0 +1,66 @@
+name:                imf-network
+version:             0.6.0
+synopsis:            Utilities for sending and receiving email messages
+homepage:            https://github.com/b0d0nne11/imf
+bug-reports:         https://github.com/b0d0nne11/imf/issues
+license:             BSD3
+license-file:        LICENSE
+author:              Brendan O'Donnell
+maintainer:          brendan@odonnell.xyz
+copyright:           Copyright (c) 2017-2020, Brendan O'Donnell
+category:            Data
+build-type:          Simple
+cabal-version:       >= 1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Data.IMF.Network
+                     , Data.IMF.Network.Chat
+                     , Data.IMF.Network.Client
+                     , Data.IMF.Network.Connection
+                     , Data.IMF.Network.DNS
+                     , Data.IMF.Network.Errors
+                     , Data.IMF.Network.Server
+  build-depends:       base >= 4.7 && < 5
+                     , imf
+                     , imf-parsers
+                     , attoparsec
+                     , data-default-class
+                     , dns
+                     , base64-bytestring
+                     , bytestring
+                     , exceptions
+                     , mtl
+                     , network
+                     , resource-pool
+                     , text
+                     , text-format
+                     , threads
+                     , time
+                     , tls
+                     , x509-system
+  ghc-options:
+  default-language:    Haskell2010
+
+test-suite imf-network-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             test.hs
+  other-modules:       Test.Client
+                     , Test.Server
+  build-depends:       base
+                     , imf
+                     , imf-parsers
+                     , imf-network
+                     , tasty
+                     , tasty-hunit
+                     , attoparsec
+                     , bytestring
+                     , resource-pool
+                     , text
+  ghc-options:
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/b0d0nne11/imf
