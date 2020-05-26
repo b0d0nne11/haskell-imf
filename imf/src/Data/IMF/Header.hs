@@ -13,7 +13,6 @@ import           Control.Monad       (when)
 import           Data.Maybe          (catMaybes, isNothing, listToMaybe)
 import           Data.Text           (Text)
 import qualified Data.Text           as T
-import           Data.Time.LocalTime (getZonedTime)
 
 import           Data.IMF.Mailbox
 import           Data.IMF.MessageId
@@ -115,4 +114,3 @@ buildHeaders HeaderOptions{..} = do
     headerIsRestricted h@(HeaderKeywords _) = False
     headerIsRestricted h@(HeaderOptional _) = False
     headerIsRestricted _                    = True
-

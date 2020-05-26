@@ -21,7 +21,7 @@ instance HasParser ZonedTime where
     parser = pTime
 
 instance IsString ZonedTime where
-    fromString = either (error "invalid datetime") id . parse . T.pack
+    fromString = either (error "invalid time") id . parse . T.pack
 
 --------------------------------------------------------------------------------
 -- Date and Time Specification <https://tools.ietf.org/html/rfc5322#section-3.3>

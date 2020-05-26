@@ -1,49 +1,27 @@
 module Data.IMF.Time
   ( ZonedTime(..)
+  , getZonedTime
+  , epoch
   )
 where
 
 import qualified Data.Text           as T
-import           Data.Time.Format    (TimeLocale (..), formatTime)
-import           Data.Time.LocalTime (ZonedTime (..), zonedTimeToUTC)
+import           Data.Time.Calendar  (Day (..))
+import           Data.Time.Format    (defaultTimeLocale, formatTime, rfc822DateFormat)
+import           Data.Time.LocalTime (LocalTime (..), ZonedTime (..), getZonedTime, midnight, utc,
+                                      zonedTimeToUTC)
 
 import           Data.IMF.Types
 
 instance Eq ZonedTime where
     t1 == t2 = zonedTimeToUTC t1 == zonedTimeToUTC t2
 
+instance Ord ZonedTime where
+    compare t1 t2 = compare (zonedTimeToUTC t1) (zonedTimeToUTC t2)
+
 instance HasFormatter ZonedTime where
-    format t = T.pack $ formatTime rfc5322DateFormat "%a, %c" t
+    format = T.pack . formatTime defaultTimeLocale rfc822DateFormat
 
--- | Time locale according to RFC 5322
-rfc5322DateFormat :: TimeLocale
-rfc5322DateFormat = TimeLocale
-    { wDays          = [ ("Sunday"   , "Sun")
-                       , ("Monday"   , "Mon")
-                       , ("Tuesday"  , "Tue")
-                       , ("Wednesday", "Wed")
-                       , ("Thursday" , "Thu")
-                       , ("Friday"   , "Fri")
-                       , ("Saturday" , "Sat")
-                       ]
-    , months         = [ ("January"  , "Jan")
-                       , ("February" , "Feb")
-                       , ("March"    , "Mar")
-                       , ("April"    , "Apr")
-                       , ("May"      , "May")
-                       , ("June"     , "Jun")
-                       , ("July"     , "Jul")
-                       , ("August"   , "Aug")
-                       , ("September", "Sep")
-                       , ("October"  , "Oct")
-                       , ("November" , "Nov")
-                       , ("December" , "Dec")
-                       ]
-    , amPm           = ("AM", "PM")
-    , dateTimeFmt    = "%e %b %Y %H:%M:%S %z"
-    , dateFmt        = "%e %b %Y"
-    , timeFmt        = "%H:%M:%S"
-    , time12Fmt      = "%I:%M:%S %p"
-    , knownTimeZones = []
-    }
-
+-- | Midnight UTC on November 17, 1858
+epoch :: ZonedTime
+epoch = ZonedTime (LocalTime (ModifiedJulianDay 0) midnight) utc

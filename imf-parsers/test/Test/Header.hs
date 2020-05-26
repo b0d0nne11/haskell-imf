@@ -2,10 +2,8 @@
 
 module Test.Header where
 
-import Data.Attoparsec.Text (endOfInput, parseOnly)
-import Data.Either          (isLeft)
-import Data.Time.Calendar   (fromGregorian)
-import Data.Time.LocalTime  (LocalTime (..), ZonedTime (..), midnight, utc)
+import Data.Attoparsec.Text    (endOfInput, parseOnly)
+import Data.Either             (isLeft)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -18,7 +16,7 @@ tests = testGroup "header parsers"
     ]
 
 testHeader = testCase "header" $ do
-    parse "Date: Thu, 1 Jan 1970 00:00:00 +0000" @?= Right (HeaderDate epoch)
+    parse "Date: Wed, 17 Nov 1858 00:00:00 +0000" @?= Right (HeaderDate epoch)
     parse "From: foo@example.com, bar@example.com" @?= Right (HeaderFrom [Mailbox "" "foo" "example.com", Mailbox "" "bar" "example.com"])
     parse "Sender: Foo <foo@example.com>" @?= Right (HeaderSender $ Mailbox "Foo" "foo" "example.com")
     parse "Reply-To: foo@example.com, bar@example.com" @?= Right (HeaderReplyTo [Mailbox "" "foo" "example.com", Mailbox "" "bar" "example.com"])
@@ -38,4 +36,3 @@ testHeader = testCase "header" $ do
     isLeft (parse "Date: foo@example.com") @? "invalid header"
   where
     parse = parseOnly $ pHeader <* endOfInput
-    epoch = ZonedTime (LocalTime (fromGregorian 1970 1 1) midnight) utc
