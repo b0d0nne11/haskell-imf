@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Rename the DateTime modules Time
 - Reorganize project to split it up into seperate pacakges
 - Rewrite tests using tasty to work better with cabal
+- Refactor the client package to simplify the interface
 
 ## [0.6.0] - 2019-12-02
 ### Added

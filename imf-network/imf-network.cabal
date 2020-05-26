@@ -29,6 +29,7 @@ library
                      , dns
                      , base64-bytestring
                      , bytestring
+                     , connection
                      , exceptions
                      , mtl
                      , network
@@ -38,6 +39,8 @@ library
                      , threads
                      , time
                      , tls
+                     , unliftio-core
+                     , unliftio
                      , x509-system
   ghc-options:
   default-language:    Haskell2010
@@ -52,12 +55,14 @@ test-suite imf-network-test
                      , imf
                      , imf-parsers
                      , imf-network
-                     , tasty
-                     , tasty-hunit
                      , attoparsec
                      , bytestring
-                     , resource-pool
+                     , connection
+                     , mtl
+                     , tasty
+                     , tasty-hunit
                      , text
+                     , unliftio
   ghc-options:
   default-language:    Haskell2010
 

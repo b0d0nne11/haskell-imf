@@ -90,7 +90,7 @@ capabilities = T.concat [ "250-SIZE 10485760\r\n"
                         ]
 
 tests :: TestTree
-tests = testGroup "client"
+tests = testGroup "server"
     [ testConnect
     , testSimpleChat
     , testPipelinedChat

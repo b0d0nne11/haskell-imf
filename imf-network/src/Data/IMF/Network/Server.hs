@@ -392,7 +392,7 @@ runSession ServerParams{..} Hooks{..} isRunning = runChat $ chat `catchError` cl
     recvLines :: Chat Session [T.Text]
     recvLines = do
         conn <- gets sessionConnection
-        map decodeUtf8 <$> recv False pLine 300 102400 conn `catchError`
+        recv False pLine 300 102400 conn `catchError`
             \e -> case e of
                 ParseFailure -> throwError CommandParseFailure
                 SizeExceeded -> throwError CommandSizeExceeded
@@ -401,7 +401,7 @@ runSession ServerParams{..} Hooks{..} isRunning = runChat $ chat `catchError` cl
     recvMessage :: Int -> Chat Session T.Text
     recvMessage maxMsgSize = do
         conn <- gets sessionConnection
-        decodeUtf8 . B.concat <$> recv True pBody 600 maxMsgSize conn `catchError`
+        T.concat <$> recv True pBody 600 maxMsgSize conn `catchError`
             \e -> case e of
                 ParseFailure -> throwError MessageParseFailure
                 SizeExceeded -> throwError MessageSizeExceeded
@@ -410,7 +410,7 @@ runSession ServerParams{..} Hooks{..} isRunning = runChat $ chat `catchError` cl
     recvCredentials :: Chat Session T.Text
     recvCredentials = do
         conn <- gets sessionConnection
-        decodeUtf8 . B.concat <$> recv True pLine 300 1024 conn `catchError`
+        T.concat <$> recv True pLine 300 1024 conn `catchError`
             \e -> case e of
                 ParseFailure -> throwError CredentialsParseFailure
                 SizeExceeded -> throwError CredentialsSizeExceeded

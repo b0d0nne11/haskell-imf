@@ -2,18 +2,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE TupleSections     #-}
 
 module Data.IMF.Network.Client
   ( Client(..)
-  , ClientParams(..)
-  , ClientLimits(..)
-  , newClient
-  , getClient
+  , SessionProps(..)
+  , initClient
   , deliver
-  , tryDeliverWithPool
-  , closeClient
-  , connect
+  , finalizeClient
   , greeting
+  , helo
+  , ehlo
   , hello
   , startTLS
   , auth
@@ -23,361 +22,283 @@ module Data.IMF.Network.Client
   , dataBlock
   , dataTerm
   , quit
-  , disconnect
+  , Envelope(..)
+  , parseWhileM
+  , cuttoff
   )
 where
 
-import           Control.Monad                  ( unless
-                                                , when
-                                                )
-import           Control.Monad.Catch            ( bracketOnError )
-import           Control.Monad.Except           ( catchError
-                                                , throwError
-                                                )
-import           Control.Monad.State            ( gets
-                                                , modify
-                                                )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Base64        as B64
-import qualified Data.ByteString.Char8         as C
-import qualified Data.ByteString.Lazy          as LB
-import           Data.Char                      ( toLower )
-import           Data.Pool                      ( Pool
-                                                , tryTakeResource
-                                                , putResource
-                                                , destroyResource
-                                                )
-import qualified Data.Text                     as T
-import           Data.Text.Encoding             ( encodeUtf8 )
-import           Data.Time.Clock                ( NominalDiffTime
-                                                , UTCTime
-                                                , getCurrentTime
-                                                , diffUTCTime
-                                                )
+import           Control.Monad              (when)
+import           Control.Monad.IO.Unlift    (MonadUnliftIO, liftIO)
+import           Control.Monad.Reader       (MonadReader, asks, runReaderT)
+import           Data.Attoparsec.ByteString (IResult (..), Result, parse)
+import           Data.ByteString            (ByteString)
+import qualified Data.ByteString            as B
+import qualified Data.ByteString.Base64     as B64
+import qualified Data.ByteString.Char8      as C
+import qualified Data.ByteString.Lazy       as LB
+import           Data.Char                  (toLower)
+import           Data.Default.Class         (def)
+import           Data.List                  (uncons)
+import           Data.Maybe                 (fromMaybe, mapMaybe)
+import           Data.Text                  (Text)
+import qualified Data.Text                  as T
+import           Data.Text.Encoding         as T
+import           Data.Time.Clock            (NominalDiffTime)
+import           Network.Connection
+import           UnliftIO.Exception         (catchJust, catchAny, throwIO, throwString)
+import           UnliftIO.Timeout           (timeout)
 
 import           Data.IMF
-import           Data.IMF.Network.Chat
-import qualified Data.IMF.Network.Connection   as Conn
-import qualified Data.IMF.Network.DNS          as DNS
 import           Data.IMF.Network.Errors
 import           Data.IMF.Parsers.Network       ( pReply )
 
--- | SMTP chat client
 data Client = Client
-    { clientConnection   :: Conn.Connection                  -- ^ mx server connection
-    , clientHostname     :: Conn.HostName                    -- ^ mx server hostname
-    , clientExtensions   :: [(B.ByteString, [B.ByteString])] -- ^ list of supported extensions and parameters
-    , clientLastCommand  :: Maybe LB.ByteString              -- ^ last command sent
-    , clientLastReply    :: Maybe (Int, [B.ByteString])      -- ^ last reply received
-    , clientError        :: ChatException                    -- ^ error or OK if everything is fine
-    , clientCreatedAt    :: UTCTime                          -- ^ created at
-    , clientMessagesSent :: Int                              -- ^ number of messages delivered
+    { clientName        :: Text
+    , clientConnection  :: Connection
+    , clientLogger      :: ByteString -> IO ()
+    , clientUseStartTLS :: Maybe TLSSettings
+    , clientUseAuth     :: Maybe (String, String)
     }
-  deriving (Show)
 
-newClient :: IO Client
-newClient = do
-    now <- getCurrentTime
-    return $ Client
-        { clientConnection   = Conn.blank
-        , clientHostname     = ""
-        , clientExtensions   = []
-        , clientLastCommand  = Nothing
-        , clientLastReply    = Nothing
-        , clientError        = OK
-        , clientCreatedAt    = now
-        , clientMessagesSent = 0
-        }
-
--- | Connection parameters
-data ClientParams = ClientParams
-    { clientName            :: String                 -- ^ name, used for hello
-    , clientSourceIP        :: String                 -- ^ source IP, use 0.0.0.0 for any
-    , clientRecipientDomain :: T.Text                 -- ^ recipient domain
-    , clientProxyHosts      :: Maybe [String]         -- ^ optional proxy hosts, skips recipient domain lookup
-    , clientAuthCredentials :: Maybe (String, String) -- ^ optional username and password
-    , clientTLSRequired     :: Bool                   -- ^ tls is required?
-    , clientTLSValidated    :: Bool                   -- ^ tls validates certificates?
+data SessionProps = SessionProps
+    { sessionGreeting        :: [Text]
+    , sessionExtentions      :: [Extention]
+    , sessionIsSecure        :: Bool
+    , sessionIsAuthenticated :: Bool
     }
-  deriving (Show, Eq)
 
-data ClientLimits = ClientLimits
-    { maxClientMessages :: Int
-    , maxClientTime     :: NominalDiffTime
+data Envelope = Envelope
+    { returnPath :: Mailbox
+    , recipient  :: Mailbox
     }
-  deriving (Show, Eq)
 
-handleError :: ChatException -> Chat Client ()
-handleError e = modify $ \c -> c { clientError = e }
+type Reply = (Int, [Text])
 
--- | Get a client
---
--- Gets a client thats ready for sending by performing the connection, greeting,
--- hello, optional starttls, and optional auth portions of the SMTP chat.
---
-getClient :: ClientParams -- ^ client parameters
-          -> IO (Client, ChatLog)
-getClient params = newClient >>= setupClient params
+type Extention = (Text, [Text])
 
-setupClient :: ClientParams -> Client -> IO (Client, ChatLog)
-setupClient params = runChat $ chat `catchError` handleError
+getReplies :: (MonadReader Client m, MonadUnliftIO m)
+           => m [Reply]
+getReplies = do
+    replies <- parseWhileM (parse pReply) 4096 getChunk
+    checkReply (last replies) >> return replies
+  where
+    checkReply (code, _)
+        | 400 <= code && code <= 499 = throwIO TemporaryFailure
+        | 500 <= code && code <= 599 = throwIO PermanentFailure
+        | otherwise                  = return ()
+
+getExtentions :: (MonadReader Client m, MonadUnliftIO m)
+              => m [Extention]
+getExtentions = mapMaybe (uncons . T.words . T.toLower) . drop 1 . snd . head <$> getReplies
+
+putCommand :: (MonadReader Client m, MonadUnliftIO m)
+           => Command
+           -> m ()
+putCommand = putChunk . T.encodeUtf8 . (`T.append` "\r\n") . format
+
+getChunk :: (MonadReader Client m, MonadUnliftIO m)
+         => m ByteString
+getChunk = do
+    conn <- asks clientConnection
+    chunk <- liftIO $ connectionGetChunk conn
+    _ <- logger $ "<- " <> chunk
+    return chunk
+
+putChunk :: (MonadReader Client m, MonadUnliftIO m)
+         => ByteString
+         -> m ()
+putChunk chunk = do
+    conn <- asks clientConnection
+    _ <- logger $ "-> " <> chunk
+    liftIO $ connectionPut conn chunk
+
+logger :: (MonadReader Client m, MonadUnliftIO m)
+       => ByteString
+       -> m ()
+logger msg = asks clientLogger >>= (\logger -> liftIO $ logger msg)
+
+parseWhileM :: MonadUnliftIO m
+            => (ByteString -> Result a)
+            -> Int
+            -> m ByteString
+            -> m [a]
+parseWhileM parse limit f = next parse limit f
+  where
+    next parse' limit' f' = do
+        when (limit' <= 0) $ throwString "failed to parse: maximum number of bytes received"
+        f' >>= \chunk' -> case parse' chunk' of
+            Fail _ _ err    -> throwString $ "failed to parse: " <> err
+            Partial parse'' -> next parse'' (limit' - B.length chunk') f
+            Done "" a       -> return [a]
+            Done chunk'' a  -> (a:) <$> next parse (limit' - B.length chunk' + B.length chunk'') (return chunk'')
+
+cuttoff :: MonadUnliftIO m
+        => NominalDiffTime
+        -> m a
+        -> m a
+cuttoff t f = timeout (floor $ t * 1000000) f >>= maybe (throwIO Timeout) return
+
+initClient :: Client
+           -> ConnectionContext
+           -> IO SessionProps
+initClient client ctx =
+    runReaderT chat client
   where
     chat = do
-        connect params
-        greeting
-        hello params
-        startTLS params
-        auth params
+        sessionGreeting <- greeting
+        exts <- hello
+        (sessionIsSecure, tlsExts) <- startTLS ("starttls" `lookup` exts) ctx
+        let sessionExtentions = fromMaybe exts tlsExts
+        sessionIsAuthenticated <- auth ("auth" `lookup` sessionExtentions)
+        return SessionProps{..}
 
--- | Deliver a message
---
--- Deliver a message by performing the mail from, recipient to, and data
--- commands. This may be run many times per client but the exact number allowed
--- depends on the receiving MX server.
---
--- The envelope sender and recipient here may differ from the message from and
--- to/cc/bcc headers for a variety of reasons. Also, the message body is sent
--- verbatim so any required modifications like message signing or masking BCC
--- addresses should be done before calling `deliver`.
---
-deliver :: Envelope      -- ^ envelope
-        -> LB.ByteString -- ^ message
-        -> Client        -- ^ client
-        -> IO (Client, ChatLog)
-deliver (Envelope sender recipeint) msg = runChat $ chat `catchError` handleError
+deliver :: Client
+        -> Envelope
+        -> LB.ByteString
+        -> IO ()
+deliver client (Envelope returnPath recipient) msg =
+    runReaderT chat client
   where
     chat = do
-        mailFrom sender
-        rcptTo recipeint
+        mailFrom returnPath
+        rcptTo recipient
         dataInit
         dataBlock msg
         dataTerm
 
-tryDeliverWithPool :: Envelope      -- ^ envelope
-                   -> LB.ByteString -- ^ message
-                   -> ClientLimits  -- ^ client limits
-                   -> Pool Client   -- ^ client pool
-                   -> IO (Maybe (Client, ChatLog))
-tryDeliverWithPool envelope msg ClientLimits{..} pool =
-    tryTakeResource pool >>= \case
-        Nothing              -> return Nothing
-        Just (client, lpool) -> do
-            resp@(client', _) <- deliver envelope msg client
-            isActive client' >>= \active -> if active
-                then putResource lpool client'
-                else destroyResource pool lpool client'
-            return $ Just resp
-  where
-    isActive Client{..} = do
-        clientTime <- (`diffUTCTime` clientCreatedAt) <$> getCurrentTime
-        return $ clientTime < maxClientTime && clientMessagesSent < maxClientMessages && clientError == OK
+finalizeClient :: Client -> IO ()
+finalizeClient = runReaderT quit
 
--- | Gracefully close a client
---
--- Closes a client gracefully by sending the quit command. This should only be
--- run once per client and only after all message deliveries are complete.
---
-closeClient :: Client -- ^ client
-            -> IO (Client, ChatLog)
-closeClient = runChat $ chat `catchError` handleError
-  where
-    chat = do
-        quit
-        disconnect
-
--- | Lookup and connect to the MX server
-connect :: ClientParams -> Chat Client ()
-connect ClientParams{..} = do
-    hosts <- whenNothing clientProxyHosts $ do
-        debug $ "looking up MX records for " <> encodeUtf8 clientRecipientDomain
-        liftChat $ DNS.lookupMX clientRecipientDomain
-    tryEach hosts $ \host -> do
-        debug $ "looking up A record for " <> C.pack host
-        dstIP <- liftChat $ DNS.lookupA host
-        tryEach ports $ \port -> do
-            debug $ "connecting to " <> C.pack dstIP <> ":" <> C.pack port
-            conn <- liftChat $ Conn.connect (clientSourceIP, "0") (dstIP, port)
-            modify $ \c -> c { clientConnection = conn
-                             , clientHostname   = host
-                             }
-            when (port == "465") $ do
-                debug "setting up tls"
-                conn' <- liftChat $ Conn.secure conn host clientTLSValidated
-                modify $ \c -> c { clientConnection = conn' }
-  where
-    ports :: [Conn.ServiceName]
-    ports = ["587", "465", "25", "2525"]
-    whenNothing :: Applicative f => Maybe a -> f a -> f a
-    whenNothing (Just x) _ = pure x
-    whenNothing Nothing m  = m
-    tryEach :: [a] -> (a -> Chat Client ()) -> Chat Client ()
-    tryEach []     _ = return ()
-    tryEach [a]    f = f a
-    tryEach (a:as) f = f a `catchError` const (tryEach as f)
-
- -- | Verify the server greeting
-greeting :: Chat Client ()
-greeting = do
-    _ <- listen 300
-    return ()
+-- | Verify the server greeting
+greeting :: (MonadReader Client m, MonadUnliftIO m)
+         => m [Text]
+greeting =
+    snd . head <$> cuttoff 300 getReplies
 
 -- | Send the HELO command
-helo :: ClientParams -> Chat Client ()
-helo ClientParams{..} = do
-    say $ LB.fromStrict $ "HELO " `B.append` C.pack clientName `B.append` "\r\n"
-    _ <- listen 300
+helo :: (MonadReader Client m, MonadUnliftIO m)
+     => m ()
+helo = do
+    name <- asks clientName
+    putCommand $ HELO name
+    _ <- cuttoff 300 getReplies
     return ()
 
 -- | Send the EHLO command
-ehlo :: ClientParams -> Chat Client ()
-ehlo ClientParams{..} = do
-    say $ LB.fromStrict $ "EHLO " `B.append` C.pack clientName `B.append` "\r\n"
-    (_, rtext) <- listen 300
-    modify $ \c -> c { clientExtensions = replyToExtentions rtext }
-    return ()
-  where
-    replyToExtentions :: [B.ByteString] -> [(B.ByteString, [B.ByteString])]
-    replyToExtentions (_:lines) = map (extention . C.words . C.map toLower) lines
-    replyToExtentions []        = []
-    extention :: [B.ByteString] -> (B.ByteString, [B.ByteString])
-    extention (a:as) = (a, as)
-    extention []     = ("", [])
+ehlo :: (MonadReader Client m, MonadUnliftIO m)
+     => m [Extention]
+ehlo = do
+    name <- asks clientName
+    putCommand $ EHLO name
+    cuttoff 300 getExtentions
 
 -- | Try to send the EHLO command, fallback to HELO if necessary
-hello :: ClientParams -> Chat Client ()
-hello params = ehlo params `catchError` const (helo params)
+hello :: (MonadReader Client m, MonadUnliftIO m)
+      => m [Extention]
+--hello = catchJust (\e -> if e `elem` [PermanentFailure, TemporaryFailure] then Just () else Nothing)
+--                  ehlo (const $ [] <$ helo)
+hello = ehlo `catchAny` const (helo >> return [])
 
 -- | Send the STARTTLS command and negotiate TLS context
-startTLS :: ClientParams -> Chat Client ()
-startTLS params@ClientParams{..} = do
-    conn <- gets clientConnection
-    serverTLS <- lookup "starttls" <$> gets clientExtensions
-    unless (Conn.isSecure conn) $
-        case (clientTLSRequired, serverTLS) of
-            (_, Just _) -> do
+startTLS :: (MonadReader Client m, MonadUnliftIO m)
+         => Maybe [Text]
+         -> ConnectionContext
+         -> m (Bool, Maybe [Extention])
+startTLS Nothing _ = do
+    conn <- asks clientConnection
+    liftIO $ (, Nothing) <$> connectionIsSecure conn
+startTLS (Just _) ctx = do
+    conn <- asks clientConnection
+    connIsSecure <- liftIO $ connectionIsSecure conn
+    if connIsSecure then return (True, Nothing) else
+        asks clientUseStartTLS >>= \case
+            Just tlsSettings -> do
                 -- issue command and wait for response
-                say "STARTTLS\r\n"
-                _ <- listen 120
+                putCommand STARTTLS
+                _ <- cuttoff 120 getReplies
                 -- negotiate TLS context
-                host <- gets clientHostname
-                debug "setting up tls"
-                conn' <- liftChat $ Conn.secure conn host clientTLSValidated
-                modify $ \c -> c { clientConnection = conn' }
+                logger "setting up tls"
+                liftIO $ connectionSetSecure ctx conn tlsSettings
                 -- test TLS context by re-issuing hello
-                hello params
-            (False, Nothing) ->
-                return ()
-            (True, Nothing) ->
-                throwError TLSNotSupported
+                (True,) . Just <$> hello
+            _ ->
+                return (False, Nothing)
 
-auth :: ClientParams -> Chat Client ()
-auth ClientParams{..} = do
-    conn <- gets clientConnection
-    serverAuthExtention <- lookup "auth" <$> gets clientExtensions
-    case (clientAuthCredentials, serverAuthExtention) of
-        (Just (user, pass), Just methods)
+auth :: (MonadReader Client m, MonadUnliftIO m)
+     => Maybe [Text]
+     -> m Bool
+auth Nothing = return False
+auth (Just methods) = do
+    conn <- asks clientConnection
+    connIsSecure <- liftIO $ connectionIsSecure conn
+    asks clientUseAuth >>= \case
+        Just (user, pass)
+            | not connIsSecure ->
+                return False
             | "login" `elem` methods -> do
-                unless (Conn.isSecure conn) $ throwError AuthNotEncrypted
-                say "AUTH LOGIN\r\n"
-                _ <- listen 120
-                whisper $ LB.fromStrict $ B64.encode (C.pack user) `B.append` "\r\n"
-                _ <- listen 120
-                whisper $ LB.fromStrict $ B64.encode (C.pack pass) `B.append` "\r\n"
-                _ <- listen 120
-                return ()
+                putCommand $ AUTH "LOGIN"
+                _ <- cuttoff 120 getReplies
+                putChunk $ B64.encode (C.pack user) <> "\r\n"
+                _ <- cuttoff 120 getReplies
+                putChunk $ B64.encode (C.pack pass) <> "\r\n"
+                _ <- cuttoff 120 getReplies
+                return True
             | "plain" `elem` methods -> do
-                unless (Conn.isSecure conn) $ throwError AuthNotEncrypted
-                whisper $ LB.fromStrict $ "AUTH PLAIN " `B.append` B64.encode (B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]) `B.append` "\r\n"
-                _ <- listen 120
-                return ()
-            | otherwise -> throwError AuthMethodNotSupported
+                putChunk $ "AUTH PLAIN " <> B64.encode (B.concat [C.pack user, C.singleton '\0', C.pack user, C.singleton '\0', C.pack pass]) <> "\r\n"
+                _ <- cuttoff 120 getReplies
+                return True
+            | otherwise -> throwIO AuthMethodNotSupported
         _ ->
-            return ()
+            return False
 
 -- | Send the MAIL FROM command
-mailFrom :: Mailbox -> Chat Client ()
-mailFrom sender = do
-    say $ LB.fromStrict $ "MAIL FROM: <" `B.append` encodeUtf8 (format $ AddrSpec sender) `B.append` ">\r\n"
-    _ <- listen 300
+mailFrom :: (MonadReader Client m, MonadUnliftIO m)
+         => Mailbox
+         -> m ()
+mailFrom returnPath = do
+    putCommand $ MAIL (format $ AddrSpec returnPath) ""
+    _ <- cuttoff 300 getReplies
     return ()
 
 -- | Send the RCPT TO command
-rcptTo :: Mailbox -> Chat Client ()
+rcptTo :: (MonadReader Client m, MonadUnliftIO m)
+       => Mailbox
+       -> m ()
 rcptTo recipient = do
-    say $ LB.fromStrict $ "RCPT TO: <" `B.append` encodeUtf8 (format $ AddrSpec recipient) `B.append` ">\r\n"
-    _ <- listen 300
+    putCommand $ RCPT (format $ AddrSpec recipient) ""
+    _ <- cuttoff 300 getReplies
     return ()
 
 -- | Send the DATA command
-dataInit :: Chat Client ()
+dataInit :: (MonadReader Client m, MonadUnliftIO m)
+         => m ()
 dataInit = do
-    say "DATA\r\n"
-    _ <- listen 120
+    putCommand DATA
+    _ <- cuttoff 120 getReplies
     return ()
 
 -- | Send the data block
-dataBlock :: LB.ByteString -> Chat Client ()
+dataBlock :: (MonadReader Client m, MonadUnliftIO m)
+          => LB.ByteString
+          -> m ()
 dataBlock msg = do
-    whisper $ msg `LB.append` "\r\n"
+    putChunk $ LB.toStrict $ msg <> "\r\n"
     return ()
 
 -- | Terminate the data block
-dataTerm :: Chat Client ()
+dataTerm :: (MonadReader Client m, MonadUnliftIO m)
+         => m ()
 dataTerm = do
-    say ".\r\n"
-    (rcode, _) <- listen 600
-    when (rcode == 250) $ modify $ \c -> c { clientMessagesSent = clientMessagesSent c + 1 }
+    putChunk ".\r\n"
+    _ <- cuttoff 600 getReplies
+    return ()
 
 -- | Send the QUIT command
-quit :: Chat Client ()
+quit :: (MonadReader Client m, MonadUnliftIO m)
+     => m ()
 quit = do
-    say "QUIT\r\n"
-    _ <- listen 120
+    putCommand QUIT
+    _ <- cuttoff 120 getReplies
     return ()
 
--- | Close the connection to the MX server
-disconnect :: Chat Client ()
-disconnect = do
-    conn <- gets clientConnection
-    debug "closing connection"
-    conn' <- liftChat $ Conn.close conn
-    modify $ \c -> c { clientConnection = conn' }
-    return ()
-
--- | Send a command
-say :: LB.ByteString -- ^ command
-    -> Chat Client ()
-say msg = do
-    conn <- gets clientConnection
-    send conn False msg
-    modify $ \c -> c { clientLastCommand = Just msg
-                     , clientLastReply   = Nothing
-                     }
-    return ()
-
--- | Send a command that shouldnt be logged
-whisper :: LB.ByteString -- ^ command
-        -> Chat Client ()
-whisper msg = do
-    conn <- gets clientConnection
-    send conn True msg
-    modify $ \c -> c { clientLastCommand = Nothing
-                     , clientLastReply   = Nothing
-                     }
-    return ()
-
--- | Listen for a reply
-listen :: NominalDiffTime -- ^ timeout
-       -> Chat Client (Int, [B.ByteString])
-listen ttl = do
-    conn <- gets clientConnection
-    reply <- last <$> recv False pReply ttl 102400 conn
-    modify $ \c -> c { clientLastReply = Just reply }
-    checkRC reply
-    return reply
-  where
-    checkRC :: (Int, [B.ByteString]) -> Chat Client ()
-    checkRC (rcode, _)
-        | rcode >= 200 && rcode <= 399 = return ()
-        | rcode >= 400 && rcode <= 499 = throwError TemporaryFailure
-        | otherwise                    = throwError PermanentFailure
