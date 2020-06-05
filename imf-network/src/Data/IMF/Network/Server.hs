@@ -1,462 +1,320 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 module Data.IMF.Network.Server
-  ( ServerParams(..)
-  , Hooks(..)
-  , server
-  , Session(..)
-  , Buffer(..)
-  , newSession
-  , runSession
+  ( Server(..)
+  , PassFail(..)
+  , runServer
   )
 where
 
-import qualified Control.Concurrent.Thread     as Thread
-import qualified Control.Concurrent.Thread.Group
-                                               as ThreadGroup
-import           Control.Monad                  ( forever
-                                                , when
-                                                )
-import           Control.Monad.Except           ( catchError
-                                                , throwError
-                                                )
-import           Control.Monad.State            ( gets
-                                                , modify
-                                                )
-import           Data.Attoparsec.Text           ( endOfInput
-                                                , parseOnly
-                                                )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Base64        as B64
-import qualified Data.ByteString.Char8         as C
-import qualified Data.ByteString.Lazy          as LB
-import           Data.IORef                     ( newIORef
-                                                , readIORef
-                                                , writeIORef
-                                                )
-import           Data.Time.Clock                ( UTCTime
-                                                , getCurrentTime
-                                                )
-import qualified Data.Text                     as T
-import           Data.Text.Encoding             ( decodeUtf8
-                                                , encodeUtf8
-                                                )
-import           Data.Traversable               ( for )
-import           System.IO                      ( hPutStrLn
-                                                , stderr
-                                                )
-import           System.Timeout                 ( timeout )
+import           Control.Monad               (forM_, join, unless, void, when)
+import           Control.Monad.IO.Unlift     (MonadUnliftIO, liftIO)
+import           Control.Monad.Loops         (iterateUntilM, untilM)
+import           Control.Monad.Reader        (ReaderT, ask, asks, local)
+import qualified Data.Attoparsec.ByteString  as B (IResult (..), Result, parse, parseWith)
+import qualified Data.Attoparsec.Text        as T (IResult (..), Result, parse, parseWith)
+import           Data.ByteString             (ByteString)
+import qualified Data.ByteString             as B
+import qualified Data.ByteString.Base64      as B64
+import qualified Data.ByteString.Char8       as C
+import           Data.Foldable               (foldlM)
+import           Data.Maybe                  (isJust, isNothing)
+import           Data.Text                   (Text)
+import qualified Data.Text                   as T
+import qualified Data.Text.Encoding          as T
+import qualified Network.TLS                 as TLS
+import           System.Log.FastLogger
+import           UnliftIO.Exception          (catchJust, throwIO)
 
 import           Data.IMF
-import           Data.IMF.Network.Chat
-import qualified Data.IMF.Network.Connection   as Conn
+import           Data.IMF.Network.Command
+import           Data.IMF.Network.Connection (Connection)
+import qualified Data.IMF.Network.Connection as Connection
 import           Data.IMF.Network.Errors
-import           Data.IMF.Parsers.Command
+import           Data.IMF.Network.Parsers
 import           Data.IMF.Parsers.Mailbox
 import           Data.IMF.Parsers.Message
-import           Data.IMF.Parsers.Network
 
-whenM :: Monad m => m Bool -> m () -> m ()
-whenM test f = do res <- test; if res then f else return ()
+type ServerM = ReaderT Server IO
 
-unlessM :: Monad m => m Bool -> m () -> m ()
-unlessM test = whenM $ not <$> test
-
-whenJustM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
-whenJustM ma f = do a <- ma; maybe (return ()) f a
-
-whileM :: Monad m => m Bool -> m () -> m ()
-whileM test f = do result <- test; if result then f >> whileM test f else return ()
-
-data ServerParams = ServerParams
-    { serverName        :: T.Text
-    , serverIP          :: String
-    , serverPort        :: String
-    , serverMaxSessions :: Int
-    , serverMaxRcpts    :: Int
-    , serverMaxMsgSize  :: Int
-    , serverAuthReq     :: Bool
-    }
-  deriving (Eq, Show)
-
-data Hooks = Hooks
-    { hookLogSession       :: (Session, ChatLog) -> IO ()
-    , hookVerifyReturnPath :: Mailbox -> IO ()
-    , hookVerifyRcpt       :: Mailbox -> IO ()
-    , hookSaveMessage      :: Buffer -> T.Text -> IO ()
-    , hookAuthenticate     :: T.Text -> T.Text -> IO ()
+data Server = Server
+    { serverName             :: Text
+    , serverConnection       :: Connection
+    , serverTLSParams        :: TLS.ServerParams
+    , serverLogger           :: LogStr -> IO ()
+    , serverAuthenticate     :: Text -> Text -> IO PassFail
+    , serverVerifyReturnPath :: Mailbox -> IO PassFail
+    , serverVerifyRecipient  :: Mailbox -> IO PassFail
+    , serverAcceptMessage    :: Maybe Mailbox -> [Mailbox] -> ByteString -> IO PassFail
+    , serverMaxRecipients    :: Int
+    , serverMaxMessageSize   :: Int
+    , serverReqTLS           :: Bool
+    , serverReqAuth          :: Bool
     }
 
-server :: ServerParams -- ^ server parameters
-       -> Hooks        -- ^ server hooks
-       -> IO (IO ())
-server params@ServerParams{..} hooks@Hooks{..}= do
-    sessions <- ThreadGroup.new
-    isRunning <- newIORef True
-    hPutStrLn stderr $ "starting server with " ++ show params
-    (_, waitForMainThread) <- Thread.forkIO $ do
-        conn <- Conn.listen (serverIP, serverPort)
-        whileM (readIORef isRunning) $ do
-            whenJustM (timeout 1000000 $ Conn.accept conn) $ \conn' -> do
-                _ <- ThreadGroup.forkIO sessions $
-                    newSession conn' >>= runSession params hooks (readIORef isRunning) >>= hookLogSession
-                ThreadGroup.waitN serverMaxSessions sessions
-        Conn.close conn
-    hPutStrLn stderr $ "up and running"
-    return $ do
-        hPutStrLn stderr $ "sending shutdown signal"
-        writeIORef isRunning False
-        hPutStrLn stderr $ "waiting for main thread to finish"
-        _ <- waitForMainThread
-        hPutStrLn stderr $ "waiting for sessions to finish"
-        ThreadGroup.wait sessions
+data PassFail = Pass | TempFail | PermFail
 
-data Session = Session
-    { sessionConnection      :: Conn.Connection
-    , sessionError           :: ChatException
-    , sessionCreatedAt       :: UTCTime
-    , sessionClientName      :: T.Text
-    , sessionInitialized     :: Bool
-    , sessionAuthenticated   :: Bool
-    , sessionBuffer          :: Maybe Buffer
-    , sessionMsgsReceived    :: Int
-    , sessionPendingReplies  :: [(Int, [B.ByteString])]
-    }
-  deriving Show
-
-newSession :: Conn.Connection -> IO Session
-newSession conn = do
-    now <- getCurrentTime
-    return Session
-        { sessionConnection      = conn
-        , sessionError           = OK
-        , sessionCreatedAt       = now
-        , sessionClientName      = ""
-        , sessionInitialized     = False
-        , sessionAuthenticated   = False
-        , sessionBuffer          = Nothing
-        , sessionMsgsReceived    = 0
-        , sessionPendingReplies  = []
-        }
-
-data Buffer = Buffer
-    { returnPath  :: Mailbox
-    , rcpts       :: [Mailbox]
-    , failedRcpts :: [T.Text]
-    }
-  deriving (Eq, Show)
-
-newBuffer :: Mailbox -> Buffer
-newBuffer returnPath =
-    Buffer
-        { returnPath  = returnPath
-        , rcpts       = []
-        , failedRcpts = []
-        }
-
-runSession :: ServerParams -- ^ server parameters
-           -> Hooks        -- ^ server hooks
-           -> IO Bool      -- ^ keep running?
-           -> Session      -- ^ session
-           -> IO (Session, ChatLog)
-runSession ServerParams{..} Hooks{..} isRunning = runChat $ chat `catchError` closeSession
+serverExtensions :: Server -> ServerM [Text]
+serverExtensions Server{..} = do
+    secure <- Connection.isSecure serverConnection
+    if secure then return tlsExtensions
+              else return defExtensions
   where
-    chat :: Chat Session ()
-    chat = do
-        saveReply (220, [encodeUtf8 serverName <> " Service ready"]) >> sendReplies
-        forever $ (recvLines >>= runLines) `catchError` handleGenericError >> sendReplies
-
-    closeSession :: ChatException -> Chat Session ()
-    closeSession e = do
-        if e == Shutdown
-            then saveReply (221, [encodeUtf8 serverName <> " Service closing transmission session"]) >> sendReplies
-            else debug $ "exception: " <> C.pack (show e)
-        conn' <- gets sessionConnection >>= liftChat . Conn.close
-        modify $ \s -> s { sessionConnection = conn'
-                         , sessionError = e
-                         }
-        return ()
-
-    runLines :: [T.Text] -> Chat Session ()
-    runLines = foldl1 (>>) . map runLine
-
-    runLine :: T.Text -> Chat Session ()
-    runLine line = (parseCommand line >>= runCommand) `catchError` handleGenericError
-
-    runCommand :: Command -> Chat Session ()
-    runCommand (EHLO clientName) = do
-        modify $ \s -> s { sessionInitialized = True
-                         , sessionClientName = clientName
-                         , sessionBuffer = Nothing
-                         }
-        saveReply ( 250
-                  , [ encodeUtf8 serverName
-                    , "SIZE " <> C.pack (show serverMaxMsgSize)
+    defExtensions = [ "SIZE " `T.append` T.pack (show serverMaxMessageSize)
                     , "8BITMIME"
                     , "SMTPUTF8"
                     , "PIPELINING"
                     , "STARTTLS"
+                    ]
+    tlsExtensions = [ "SIZE " `T.append` T.pack (show serverMaxMessageSize)
+                    , "8BITMIME"
+                    , "SMTPUTF8"
+                    , "PIPELINING"
                     , "AUTH PLAIN LOGIN"
                     ]
-                  )
-    runCommand (HELO clientName) = do
-        modify $ \s -> s { sessionInitialized = True
-                         , sessionClientName  = clientName
-                         , sessionBuffer = Nothing
-                         }
-        saveReply (250, ["OK"])
-    runCommand RSET = (`catchError` handleGenericError) $ do
-        modify $ \s -> s { sessionBuffer = Nothing }
-        saveReply (250, ["OK"])
-    runCommand (VRFY _ paramsText) = do
-        params <- parseVrfyParams paramsText
-        for params $ \param -> case param of
-            SMTPUTF8 -> return ()
-            _        -> throwError ParameterNotImplemented
-        saveReply (252, ["Cannot VRFY user, but will accept message and attempt delivery"])
-    runCommand NOOP =
-        saveReply (250, ["OK"])
-    runCommand QUIT =
-        throwError Shutdown
-    runCommand (MAIL mboxText paramsText) = (`catchError` handleMailError mboxText) $ do
-        checkShutdownInProgress
-        checkInitialized
-        checkAuthenticated
-        checkReadyForMail
-        returnPath <- parseMailbox mboxText
-        params <- parseMailParams paramsText
-        for params $ \param -> case param of
-            SIZE n   -> when (n > serverMaxMsgSize) $ throwError MessageSizeExceeded
-            BODY _   -> return ()
-            SMTPUTF8 -> return ()
-            AUTHP _  -> return ()
-            _        -> throwError ParameterNotImplemented
-        liftChat $ hookVerifyReturnPath returnPath
-        modify $ \s -> s { sessionBuffer = Just $ newBuffer returnPath }
-        saveReply (250, ["Mailbox " <> encodeUtf8 mboxText <> " OK"])
-    runCommand (RCPT mboxText paramsText) = (`catchError` handleRcptError mboxText) $ do
-        checkShutdownInProgress
-        checkInitialized
-        checkAuthenticated
-        buffer@Buffer{..} <- checkReadyForRcpt
-        rcpt <- parseMailbox mboxText
-        params <- parseRcptParams paramsText
-        for params $ \param -> case param of
-            _ -> throwError ParameterNotImplemented
-        liftChat $ hookVerifyRcpt rcpt
-        modify $ \s -> s { sessionBuffer = Just $ buffer { rcpts = rcpt:rcpts }}
-        saveReply (250, ["Mailbox " <> encodeUtf8 mboxText <> " OK"])
-    runCommand DATA = (`catchError` handleDataError) $ do
-        -- data init
-        checkShutdownInProgress
-        checkInitialized
-        checkAuthenticated
-        buffer@Buffer{..} <- checkReadyForData
-        saveReply (354, ["End data with <CR><LF>.<CR><LF>"])
-        sendReplies
-        -- data block
-        messageText <- recvMessage serverMaxMsgSize
-        -- data term
-        _ <- parseMessage messageText
-        liftChat $ hookSaveMessage buffer messageText
-        modify $ \s -> s { sessionBuffer = Nothing
-                         , sessionMsgsReceived = sessionMsgsReceived s + 1
-                         }
-        saveReply (250, ["OK"])
-    runCommand STARTTLS = do
-        -- starttls init
-        checkShutdownInProgress
-        checkInitialized
-        saveReply (220, ["Go ahead"])
-        sendReplies
-        -- starttls negotiate
-        debug "setting up tls"
-        conn' <- gets sessionConnection >>= liftChat . Conn.secureServer
-        modify $ \s -> s { sessionConnection = conn' }
-    runCommand (AUTH paramsText) = (`catchError` handleAuthError) $ do
-        checkShutdownInProgress
-        checkInitialized
-        checkSecureConnection
-        param <- parseAuthParams paramsText
-        case param of
-            PLAIN "" -> do
-                saveReply (334, ["Go ahead"])
-                sendReplies
-                creds <- recvCredentials >>= decodeCredentials
-                case T.split (== '\0') creds of
-                    [_, user, pass] -> liftChat $ hookAuthenticate user pass
-                    _               -> throwError CredentialsParseFailure
-            PLAIN initial -> do
-                creds <- decodeCredentials initial
-                case T.split (== '\0') creds of
-                    [_, user, pass] -> liftChat $ hookAuthenticate user pass
-                    _               -> throwError CredentialsParseFailure
-            LOGIN "" -> do
-                saveReply (334, ["VXNlcm5hbWU6"])
-                sendReplies
-                user <- recvCredentials >>= decodeCredentials
-                saveReply (334, ["UGFzc3dvcmQ6"])
-                sendReplies
-                pass <- recvCredentials >>= decodeCredentials
-                liftChat $ hookAuthenticate user pass
-            LOGIN initial -> do
-                user <- decodeCredentials initial
-                saveReply (334, ["UGFzc3dvcmQ6"])
-                sendReplies
-                pass <- recvCredentials >>= decodeCredentials
-                liftChat $ hookAuthenticate user pass
-            _ ->
-                throwError ParameterNotImplemented
-        modify $ \s -> s { sessionAuthenticated = True }
-        saveReply (235, ["Authentication successful"])
 
-    checkShutdownInProgress :: Chat Session ()
-    checkShutdownInProgress = unlessM (liftChat isRunning) $ throwError ShutdownInProgress
+data ServerSession = ServerSession
+    { sessionGreeting   :: Maybe Text
+    , sessionUser       :: Maybe Text
+    , sessionReturnPath :: Maybe Mailbox
+    , sessionRecipients :: [Mailbox]
+    , sessionClose      :: Bool
+    }
+  deriving Show
 
-    checkInitialized :: Chat Session ()
-    checkInitialized = unlessM (gets sessionInitialized) $ throwError CommandOutOfOrder
+newSession :: ServerSession
+newSession = ServerSession
+    { sessionGreeting   = Nothing
+    , sessionUser       = Nothing
+    , sessionReturnPath = Nothing
+    , sessionRecipients = []
+    , sessionClose      = False
+    }
 
-    checkAuthenticated :: Chat Session ()
-    checkAuthenticated = when serverAuthReq $ unlessM (gets sessionAuthenticated) $ throwError AuthenticationRequired
+recvParsed :: (ByteString -> B.Result a) -> Int -> ServerM a
+recvParsed parse limit = do
+    when (limit <= 0) $ throwIO ParseSizeExceeded
+    join $ recv' $ \chunk -> case parse chunk of
+        B.Fail chunk' _ err -> do
+            logger . ("< " <>) $ B.take (B.length chunk - B.length chunk') chunk
+            return (chunk', throwIO $ ParseFailure err)
+        B.Partial parse' -> do
+            logger . ("< " <>) $ chunk
+            return ("", recvParsed parse' $ limit - B.length chunk)
+        B.Done chunk' a -> do
+            logger . ("< " <>) $ B.take (B.length chunk - B.length chunk') chunk
+            return (chunk', return a)
+  where
+    recv' f = asks serverConnection >>= \conn -> Connection.recv' conn f
 
-    checkSecureConnection :: Chat Session ()
-    checkSecureConnection = unlessM (Conn.isSecure <$> gets sessionConnection) $ throwError EncryptionRequired
+recvLine :: ServerM Text
+recvLine = catchJust fromException (recvParsed (B.parse pTextLine) 4096) throwReply
+  where
+    fromException ParseSizeExceeded = Just (500, ["Syntax error, command unrecognized"])
+    fromException (ParseFailure _)  = Just (500, ["Syntax error, command unrecognized"])
 
-    checkReadyForMail :: Chat Session ()
-    checkReadyForMail = unlessM ((== Nothing) <$> gets sessionBuffer) $ throwError CommandOutOfOrder
+recvLines :: ServerM [Text]
+recvLines = recvLine `untilM` done
+  where
+    done = asks serverConnection >>= fmap B.null . Connection.lookAhead
 
-    checkReadyForRcpt :: Chat Session Buffer
-    checkReadyForRcpt = do
-        buffer@Buffer{..} <- gets sessionBuffer >>= maybe (throwError CommandOutOfOrder) return
-        when (length rcpts >= serverMaxRcpts) $ throwError TooManyRecipients
-        return buffer
+recvData :: ServerM ByteString
+recvData = catchJust fromException (asks serverMaxMessageSize >>= recvParsed (B.parse pData)) throwReply
+  where
+    fromException ParseSizeExceeded = Just (552, ["Message exceeds fixed maximum message size"])
+    fromException (ParseFailure _)  = Just (500, ["Syntax error, message unrecognized"])
 
-    checkReadyForData :: Chat Session Buffer
-    checkReadyForData = do
-        buffer@Buffer{..} <- gets sessionBuffer >>= maybe (throwError CommandOutOfOrder) return
-        when (null rcpts) $ throwError NoValidRecipients
-        return buffer
+putReply :: (Int, [Text]) -> ServerM ()
+putReply reply = do
+    conn <- asks serverConnection
+    Connection.put conn $ formatReply reply
+    logger . ("> " <>) $ formatReply reply
 
-    handleGenericError :: ChatException -> Chat Session ()
-    handleGenericError CommandParseFailure     = saveReply (500, ["Syntax error, command unrecognized"])
-    handleGenericError CommandSizeExceeded     = saveReply (500, ["Syntax error, command unrecognized"])
-    handleGenericError ParameterParseFailure   = saveReply (501, ["Syntax error, command parameter or argument unrecognized"])
-    handleGenericError CredentialsParseFailure = saveReply (501, ["Syntax error, credentials unrecognized"])
-    handleGenericError CredentialsSizeExceeded = saveReply (501, ["Syntax error, credentials unrecognized"])
-    handleGenericError CommandNotImplemented   = saveReply (502, ["Command not implemented"])
-    handleGenericError CommandOutOfOrder       = saveReply (503, ["Bad sequence of commands"])
-    handleGenericError ParameterNotImplemented = saveReply (504, ["Command parameter or argument not implemented"])
-    handleGenericError AuthenticationRequired  = saveReply (530, ["Authentication required"])
-    handleGenericError EncryptionRequired      = saveReply (538, ["Encryption required"])
-    handleGenericError MailboxParseFailure     = saveReply (550, ["Syntax error, mailbox unrecognized"])
-    handleGenericError MessageParseFailure     = saveReply (550, ["Syntax error, message unrecognized"])
-    handleGenericError MessageSizeExceeded     = saveReply (552, ["Message exceeds fixed maximum message size"])
-    handleGenericError NoValidRecipients       = saveReply (554, ["No valid recipients"])
-    handleGenericError ShutdownInProgress      = saveReply (421, [encodeUtf8 serverName <> " Service not available, shutting down"])
-    handleGenericError TooManyRecipients       = saveReply (452, ["Too many recipients"])
-    handleGenericError e                       = throwError e
+sendReply :: (Int, [Text]) -> ServerM ()
+sendReply reply = do
+    conn <- asks serverConnection
+    Connection.send conn $ formatReply reply
+    logger . ("> " <>) $ formatReply reply
 
-    handleMailError :: T.Text -> ChatException -> Chat Session ()
-    handleMailError mboxText TemporaryFailure    = saveReply (450, ["Mailbox " <> encodeUtf8 mboxText <> " unavailable"])
-    handleMailError mboxText PermanentFailure    = saveReply (550, ["Mailbox " <> encodeUtf8 mboxText <> " unavailable"])
-    handleMailError mboxText MailboxParseFailure = saveReply (550, ["Syntax error, mailbox " <> encodeUtf8 mboxText <> " unrecognized"])
-    handleMailError _        e                   = throwError e
+formatReply :: (Int, [Text]) -> ByteString
+formatReply (code, [])   = C.pack (show code) <> " " <> "\r\n"
+formatReply (code, l:[]) = C.pack (show code) <> " " <> T.encodeUtf8 l <> "\r\n"
+formatReply (code, l:ls) = C.pack (show code) <> "-" <> T.encodeUtf8 l <> "\r\n" <> formatReply (code, ls)
 
-    handleRcptError :: T.Text -> ChatException -> Chat Session ()
-    handleRcptError mboxText TemporaryFailure = do
-        buffer@Buffer{..} <- gets sessionBuffer >>= maybe (throwError CommandOutOfOrder) return
-        modify $ \s -> s { sessionBuffer = Just $ buffer { failedRcpts = mboxText:failedRcpts }}
-        saveReply (450, ["Mailbox " <> encodeUtf8 mboxText <> " unavailable"])
-    handleRcptError mboxText PermanentFailure = do
-        buffer@Buffer{..} <- gets sessionBuffer >>= maybe (throwError CommandOutOfOrder) return
-        modify $ \s -> s { sessionBuffer = Just $ buffer { failedRcpts = mboxText:failedRcpts }}
-        saveReply (550, ["Mailbox " <> encodeUtf8 mboxText <> " unavailable"])
-    handleRcptError mboxText MailboxParseFailure = do
-        buffer@Buffer{..} <- gets sessionBuffer >>= maybe (throwError CommandOutOfOrder) return
-        modify $ \s -> s { sessionBuffer = Just $ buffer { failedRcpts = mboxText:failedRcpts }}
-        saveReply (550, ["Syntax error, mailbox " <> encodeUtf8 mboxText <> " unrecognized"])
-    handleRcptError mboxText e = do
-        throwError e
+logger :: ToLogStr msg => msg -> ServerM ()
+logger msg = asks serverLogger >>= \log -> liftIO $ log $ toLogStr msg
 
-    handleDataError :: ChatException -> Chat Session ()
-    handleDataError TemporaryFailure = saveReply (451, ["Requested action aborted, local error in processing"])
-    handleDataError PermanentFailure = saveReply (554, ["Transaction failed"])
-    handleDataError e                = throwError e
+redact :: LogStr -> ServerM a -> ServerM a
+redact msg = local $ \s -> s { serverLogger = const $ serverLogger s msg }
 
-    handleAuthError :: ChatException -> Chat Session ()
-    handleAuthError TemporaryFailure = saveReply (454, ["Temporary authentication failure"])
-    handleAuthError PermanentFailure = saveReply (535, ["Authentication failed"])
-    handleAuthError e                = throwError e
+runServer :: ServerM ()
+runServer = opening >>= void . iterateUntilM sessionClose loop
+  where
+    opening = do
+        Server{..} <- ask
+        sendReply (220, [serverName <> " Service ready"])
+        return newSession
+    loop session = do
+        lines <- cuttoff 10 recvLines
+        session <- foldlM step session lines
+        asks serverConnection >>= Connection.flush
+        return session
+    step session line =
+        handleReply (\r -> putReply r >> return session) $
+            parseCommand line >>= runCommand session
 
-    recvLines :: Chat Session [T.Text]
-    recvLines = do
-        conn <- gets sessionConnection
-        recv False pLine 300 102400 conn `catchError`
-            \e -> case e of
-                ParseFailure -> throwError CommandParseFailure
-                SizeExceeded -> throwError CommandSizeExceeded
-                _            -> throwError e
+parseCommand :: Text -> ServerM (Command, Text)
+parseCommand i =
+    T.parseWith (return "") pCommand i >>= \case
+        T.Done i' r -> return (r, i')
+        _           -> throwReply (500, ["Syntax error, command unrecognized"])
 
-    recvMessage :: Int -> Chat Session T.Text
-    recvMessage maxMsgSize = do
-        conn <- gets sessionConnection
-        T.concat <$> recv True pBody 600 maxMsgSize conn `catchError`
-            \e -> case e of
-                ParseFailure -> throwError MessageParseFailure
-                SizeExceeded -> throwError MessageSizeExceeded
-                _            -> throwError e
+parseMailbox :: Text -> ServerM (Mailbox, Text)
+parseMailbox i =
+    T.parseWith (return "") pMailbox i >>= \case
+        T.Done i' r -> return (r, i')
+        _           -> throwReply (550, ["Syntax error, mailbox " <> i <> " unrecognized"])
 
-    recvCredentials :: Chat Session T.Text
-    recvCredentials = do
-        conn <- gets sessionConnection
-        T.concat <$> recv True pLine 300 1024 conn `catchError`
-            \e -> case e of
-                ParseFailure -> throwError CredentialsParseFailure
-                SizeExceeded -> throwError CredentialsSizeExceeded
-                _            -> throwError e
+parseMessage :: Text -> ServerM (Message, Text)
+parseMessage i =
+    T.parseWith (return "") pMessage i >>= \case
+        T.Done i' r -> return (r, i')
+        _           -> throwReply (550, ["Syntax error, message unrecognized"])
 
-    decodeCredentials :: T.Text -> Chat Session T.Text
-    decodeCredentials "=" = return ""
-    decodeCredentials creds =
-        case B64.decode $ encodeUtf8 creds of
-            Left _      -> throwError CredentialsParseFailure
-            Right creds -> return $ decodeUtf8 creds
+parseBase64 :: Text -> ServerM Text
+parseBase64 i =
+    case B64.decode $ T.encodeUtf8 i of
+        Right i' -> return $ T.decodeUtf8 i'
+        _        -> throwReply (501, ["Syntax error, credentials unrecognized"])
 
-    saveReply :: (Int, [B.ByteString]) -> Chat Session ()
-    saveReply r = do
-        rs <- gets sessionPendingReplies
-        modify $ \s -> s { sessionPendingReplies = rs ++ [r] }
-
-    sendReplies :: Chat Session ()
-    sendReplies = do
-        rs <- gets sessionPendingReplies
-        modify $ \s -> s { sessionPendingReplies = [] }
-        conn <- gets sessionConnection
-        send conn False $ LB.fromStrict $ B.concat $ map formatReply rs
-
-    formatReply :: (Int, [B.ByteString]) -> B.ByteString
-    formatReply (code, [])         = C.pack (show code) <> " " <> "\r\n"
-    formatReply (code, line:[])    = C.pack (show code) <> " " <> line <> "\r\n"
-    formatReply (code, line:lines) = C.pack (show code) <> "-" <> line <> "\r\n" <> formatReply (code, lines)
-
-    parseCommand :: T.Text -> Chat Session Command
-    parseCommand = either (const $ throwError CommandParseFailure) return . parseOnly (pCommand <* endOfInput)
-
-    parseVrfyParams :: T.Text -> Chat Session [Param]
-    parseVrfyParams = either (const $ throwError ParameterParseFailure) return . parseOnly (pVrfyParams <* endOfInput)
-
-    parseMailParams :: T.Text -> Chat Session [Param]
-    parseMailParams = either (const $ throwError ParameterParseFailure) return . parseOnly (pMailParams <* endOfInput)
-
-    parseRcptParams :: T.Text -> Chat Session [Param]
-    parseRcptParams = either (const $ throwError ParameterParseFailure) return . parseOnly (pRcptParams <* endOfInput)
-
-    parseAuthParams :: T.Text -> Chat Session Param
-    parseAuthParams = either (const $ throwError ParameterParseFailure) return . parseOnly (pAuthParams <* endOfInput)
-
-    parseMailbox :: T.Text -> Chat Session Mailbox
-    parseMailbox = either (const $ throwError MailboxParseFailure) return . parseOnly (pMailbox <* endOfInput)
-
-    parseMessage :: T.Text -> Chat Session Message
-    parseMessage = either (const $ throwError MessageParseFailure) return . parseOnly (pMessage <* endOfInput)
+runCommand :: ServerSession -> (Command, Text) -> ServerM ServerSession
+runCommand session (HELO, line) = do
+    sendReply (250, ["OK"])
+    return $ session { sessionGreeting = Just $ T.strip line }
+runCommand session (EHLO, line) = do
+    Server{..} <- ask
+    serverExtensions <- join $ asks serverExtensions
+    sendReply (250, serverName : serverExtensions)
+    return $ session { sessionGreeting = Just $ T.strip line }
+runCommand session (RSET, _) = do
+    sendReply (250, ["OK"])
+    return $ session { sessionReturnPath = Nothing, sessionRecipients = [] }
+runCommand session (VRFY, line) = do
+    (_, line') <- parseMailbox line
+    forM_ (map (T.breakOn "=") $ T.words $ T.strip line') $ \case
+        ("SMTPUTF8", "") -> return ()
+        _                -> throwReply (504, ["Command parameter or argument not implemented"])
+    sendReply (252, ["Cannot VRFY user, but will accept message and attempt delivery"])
+    return session
+runCommand session (NOOP, _) = do
+    sendReply (250, ["OK"])
+    return session
+runCommand session (QUIT, _) = do
+    Server{..} <- ask
+    sendReply (221, [serverName <> " Service closing transmission session"])
+    return $ session { sessionClose = True }
+runCommand session@ServerSession{..} (MAIL, line) = do
+    Server{..} <- ask
+    when (isNothing sessionGreeting || isJust sessionReturnPath) $
+        throwReply (503, ["Bad sequence of commands"])
+    Connection.isSecure serverConnection >>= \secure -> when (serverReqTLS && not secure) $
+        throwReply (530, ["Must issue a STARTTLS command first"])
+    when (serverReqAuth && isNothing sessionUser) $
+        throwReply (530, ["Authentication required"])
+    (mbox, line') <- parseMailbox line
+    forM_ (map (T.breakOn "=") $ T.words $ T.strip line') $ \case
+        ("SIZE", size)       -> when (read (T.unpack size) > serverMaxMessageSize) $ throwReply (552, ["Message exceeds fixed maximum message size"])
+        ("BODY", "7BIT")     -> return ()
+        ("BODY", "8BITMIME") -> return ()
+        ("SMTPUTF8", "")     -> return ()
+        ("AUTH", _)          -> return ()
+        _                    -> throwReply (504, ["Command parameter or argument not implemented"])
+    liftIO (serverVerifyReturnPath mbox) >>= \case
+        Pass      -> putReply   (250, ["Mailbox <" <> format mbox <> "> OK"])
+        TempFail  -> throwReply (450, ["Mailbox <" <> format mbox <> "> unavailable"])
+        PermFail  -> throwReply (550, ["Mailbox <" <> format mbox <> "> unavailable"])
+    return $ session { sessionReturnPath = Just mbox }
+runCommand session@ServerSession{..} (RCPT, line) = do
+    Server{..} <- ask
+    when (isNothing sessionReturnPath) $
+        throwReply (503, ["Bad sequence of commands"])
+    when (length sessionRecipients >= serverMaxRecipients) $
+        throwReply (452, ["Too many recipients"])
+    (mbox, line') <- parseMailbox line
+    forM_ (map (T.breakOn "=") $ T.words $ T.strip line') $ \_ ->
+        throwReply (504, ["Command parameter or argument not implemented"])
+    liftIO (serverVerifyRecipient mbox) >>= \case
+        Pass      -> putReply   (250, ["Mailbox <" <> format mbox <> "> OK"])
+        TempFail  -> throwReply (450, ["Mailbox <" <> format mbox <> "> unavailable"])
+        PermFail  -> throwReply (550, ["Mailbox <" <> format mbox <> "> unavailable"])
+    return $ session { sessionRecipients = mbox : sessionRecipients }
+runCommand session@ServerSession{..} (DATA, _) = do
+    Server{..} <- ask
+    when (isNothing sessionReturnPath) $
+        throwReply (503, ["Bad sequence of commands"])
+    when (null sessionRecipients) $
+        throwReply (554, ["No valid recipients"])
+    sendReply (354, ["End data with <CR><LF>.<CR><LF>"])
+    logger ("< [...]\r\n" :: LogStr)
+    msg <- redact "" $ cuttoff 600 recvData
+    when (B.length msg > serverMaxMessageSize) $
+        throwReply (552, ["Message exceeds fixed maximum message size"])
+    _ <- parseMessage $ T.decodeUtf8 msg
+    liftIO (serverAcceptMessage sessionReturnPath sessionRecipients msg) >>= \case
+        Pass      -> putReply   (250, ["OK"])
+        TempFail  -> throwReply (451, ["Local error in processing"])
+        PermFail  -> throwReply (554, ["Transaction failed"])
+    return $ session { sessionReturnPath = Nothing, sessionRecipients = [] }
+runCommand session (STARTTLS, _) = do
+    Server{..} <- ask
+    Connection.isSecure serverConnection >>= \secure -> when secure $
+        throwReply (502, ["Command not implemented"])
+    sendReply (220, ["Go ahead"])
+    Connection.secure serverConnection serverTLSParams
+    logger (". [tls handshake]\r\n" :: LogStr)
+    return newSession
+runCommand session (AUTH, line) = case T.words $ T.strip line of
+    ["PLAIN"] -> do
+        Server{..} <- ask
+        Connection.isSecure serverConnection >>= \secure -> unless secure $
+            throwReply (502, ["Command not implemented"])
+        sendReply (334, ["Go ahead"])
+        creds <- redact "< [...]\r\n" recvLine
+        runCommand session (AUTH, "PLAIN " <> creds)
+    ["PLAIN", creds] -> do
+        Server{..} <- ask
+        Connection.isSecure serverConnection >>= \secure -> unless secure $
+            throwReply (502, ["Command not implemented"])
+        (user, pass) <- T.split (== '\0') <$> parseBase64 creds >>= \case
+            [_, user, pass] -> return (user, pass)
+            _               -> throwReply (501, ["Syntax error, credentials unrecognized"])
+        liftIO (serverAuthenticate user pass) >>= \case
+            Pass      -> putReply   (235, ["Authentication succeeded"])
+            TempFail  -> throwReply (454, ["Temporary authentication failure"])
+            PermFail  -> throwReply (535, ["Authentication credentials invalid"])
+        return $ session { sessionUser = Just user }
+    ["LOGIN"] -> do
+        Server{..} <- ask
+        Connection.isSecure serverConnection >>= \secure -> unless secure $
+            throwReply (502, ["Command not implemented"])
+        sendReply (334, ["VXNlcm5hbWU6"])
+        user <- redact "< [...]\r\n" recvLine
+        runCommand session (AUTH, "LOGIN " <> user)
+    ["LOGIN", user] -> do
+        Server{..} <- ask
+        Connection.isSecure serverConnection >>= \secure -> unless secure $
+            throwReply (502, ["Command not implemented"])
+        sendReply (334, ["UGFzc3dvcmQ6"])
+        user <- parseBase64 user
+        pass <- redact "< [...]\r\n" recvLine >>= parseBase64
+        liftIO (serverAuthenticate user pass) >>= \case
+            Pass      -> putReply   (235, ["Authentication succeeded"])
+            TempFail  -> throwReply (454, ["Temporary authentication failure"])
+            PermFail  -> throwReply (535, ["Authentication credentials invalid"])
+        return $ session { sessionUser = Just user }
+    _ ->
+        throwReply (504, ["Command parameter or argument not implemented"])

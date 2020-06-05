@@ -15,13 +15,11 @@ cabal-version:       >= 1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Data.IMF.Parsers
-                     , Data.IMF.Parsers.Command
                      , Data.IMF.Parsers.Core
                      , Data.IMF.Parsers.Header
                      , Data.IMF.Parsers.Mailbox
                      , Data.IMF.Parsers.Message
                      , Data.IMF.Parsers.MessageId
-                     , Data.IMF.Parsers.Network
                      , Data.IMF.Parsers.Time
                      , Data.IMF.Parsers.Types
   build-depends:       base >= 4.7 && < 5

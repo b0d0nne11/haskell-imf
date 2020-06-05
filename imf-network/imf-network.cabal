@@ -15,11 +15,11 @@ cabal-version:       >= 1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Data.IMF.Network
-                     , Data.IMF.Network.Chat
                      , Data.IMF.Network.Client
+                     , Data.IMF.Network.Command
                      , Data.IMF.Network.Connection
-                     , Data.IMF.Network.DNS
                      , Data.IMF.Network.Errors
+                     , Data.IMF.Network.Parsers
                      , Data.IMF.Network.Server
   build-depends:       base >= 4.7 && < 5
                      , imf
@@ -29,19 +29,17 @@ library
                      , dns
                      , base64-bytestring
                      , bytestring
-                     , connection
-                     , exceptions
+                     , fast-logger
+                     , monad-loops
                      , mtl
                      , network
-                     , resource-pool
                      , text
-                     , text-format
-                     , threads
                      , time
                      , tls
                      , unliftio-core
                      , unliftio
                      , x509-system
+                     , x509-store
   ghc-options:
   default-language:    Haskell2010
 
@@ -57,11 +55,13 @@ test-suite imf-network-test
                      , imf-network
                      , attoparsec
                      , bytestring
-                     , connection
+                     , fast-logger
                      , mtl
                      , tasty
                      , tasty-hunit
                      , text
+                     , tls
+                     , unliftio-core
                      , unliftio
   ghc-options:
   default-language:    Haskell2010

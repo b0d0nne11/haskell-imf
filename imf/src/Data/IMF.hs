@@ -1,6 +1,5 @@
 module Data.IMF
-  ( module Data.IMF.Command
-  , module Data.IMF.Header
+  ( module Data.IMF.Header
   , module Data.IMF.Mailbox
   , module Data.IMF.Message
   , module Data.IMF.MessageId
@@ -9,7 +8,6 @@ module Data.IMF
   )
 where
 
-import Data.IMF.Command
 import Data.IMF.Header
 import Data.IMF.Mailbox
 import Data.IMF.Message

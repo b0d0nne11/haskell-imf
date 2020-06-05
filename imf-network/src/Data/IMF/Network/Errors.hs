@@ -1,49 +1,44 @@
 module Data.IMF.Network.Errors
-    ( ChatException(..)
+    ( Timeout(..)
+    , cuttoff
+    , ReplyException(..)
+    , throwReply
+    , catchReply
+    , handleReply
+    , ParseException(..)
     )
 where
 
-import           Control.Monad.Catch            ( Exception )
-import           Network.TLS                    ( TLSException )
+import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO)
+import Data.Text               (Text)
+import Data.Time.Clock         (NominalDiffTime)
+import UnliftIO.Exception
+import UnliftIO.Timeout        (timeout)
 
-data ChatException = OK
-                   | DNSLookupFailed
-                   | DNSLookupNotFound
-                   | ConnectFailure IOError
-                   | SocketFailure IOError
-                   | TLSSocketFailure TLSException
-                   | InvalidSocketOperation
-                   | PeerConnectionClosed
-                   | Timeout
-                   | ParseFailure
-                   | SizeExceeded
-                   | TemporaryFailure
-                   | PermanentFailure
-                     -- client-only exceptions
-                   | TLSNotSupported
-                   | TLSNegotiationFailure TLSException
-                   | AuthNotSupported
-                   | AuthMethodNotSupported
-                   | AuthNotEncrypted
-                     -- server-only exceptions
-                   | Shutdown
-                   | CommandParseFailure
-                   | CommandSizeExceeded
-                   | ParameterParseFailure
-                   | CommandNotImplemented
-                   | CommandOutOfOrder
-                   | ParameterNotImplemented
-                   | ShutdownInProgress
-                   | MailboxParseFailure
-                   | TooManyRecipients
-                   | MessageParseFailure
-                   | MessageSizeExceeded
-                   | NoValidRecipients
-                   | CredentialsParseFailure
-                   | CredentialsSizeExceeded
-                   | AuthenticationRequired
-                   | EncryptionRequired
+data Timeout = Timeout
   deriving (Show, Eq)
 
-instance Exception ChatException
+instance Exception Timeout
 
+cuttoff :: MonadUnliftIO m => NominalDiffTime -> m a -> m a
+cuttoff t f = timeout (floor $ t * 1e6) f >>= maybe (throwIO Timeout) return
+
+newtype ReplyException = ReplyException (Int, [Text])
+  deriving (Show, Eq)
+
+instance Exception ReplyException
+
+throwReply :: MonadIO m => (Int, [Text]) -> m a
+throwReply r = throwIO $ ReplyException r
+
+catchReply :: MonadUnliftIO m => m a -> ((Int, [Text]) -> m a) -> m a
+catchReply = catchJust (\(ReplyException r) -> Just r)
+
+handleReply :: MonadUnliftIO m => ((Int, [Text]) -> m a) -> m a -> m a
+handleReply = flip catchReply
+
+data ParseException = ParseSizeExceeded
+                    | ParseFailure String
+  deriving (Show, Eq)
+
+instance Exception ParseException

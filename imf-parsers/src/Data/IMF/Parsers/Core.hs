@@ -76,7 +76,7 @@ pWSP = takeWhile1 isWSP <?> "whitespace"
 
 -- | End of line
 pEOL :: Parser T.Text
-pEOL = "\r\n" <?> "end of line"
+pEOL = "\r\n" <|> "\n" <?> "end of line"
 
 -- | Match visible characters
 isVCHAR :: Char -> Bool
