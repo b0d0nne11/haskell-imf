@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
+
+## [0.7.0] - 2020-07-19
 ### Added
 - Added PIPELINING, STARTTLS, and AUTH to server
 - Add type classes for objects that have a parser

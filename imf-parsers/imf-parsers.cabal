@@ -1,5 +1,5 @@
 name:                imf-parsers
-version:             0.6.0
+version:             0.7.0
 synopsis:            Utilities for parsing email messages
 homepage:            https://github.com/b0d0nne11/imf
 bug-reports:         https://github.com/b0d0nne11/imf/issues
