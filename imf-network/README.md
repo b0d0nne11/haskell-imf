@@ -6,7 +6,7 @@ This package provides utilities for sending and receiving email messages.
 
 ### Sending
 
-Send an email:
+Send an email to `mailbin`:
 ```
 $> cabal v2-repl imf-network
 ...
@@ -16,7 +16,7 @@ $> cabal v2-repl imf-network
 *Data.IMF.Network LB System.Log.FastLogger> import Control.Monad.Reader
 *Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> (logger, _) <- newFastLogger LogNone
 *Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> message <- LB.readFile "test/Fixtures/Messages/simple_addressing_1.txt"
-*Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> conn <- connectMX ("0.0.0.0", "0") "localhost"
+*Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> conn <- connectMX ("0.0.0.0", "0") "127.0.0.1"
 *Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> let client = Client "relay.example.com" conn (tlsClientParams "localhost" False) logger Nothing)
 *Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> runReaderT (setup >> deliver "no-reply@example.com" ["test@example.com"] message >> quit) client
 *Data.IMF.Network LB System.Log.FastLogger Control.Monad.Reader> close conn

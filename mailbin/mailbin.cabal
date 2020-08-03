@@ -1,0 +1,46 @@
+name:                mailbin
+version:             0.1.0
+synopsis:            Utility to simplify testing of smtp clients
+homepage:            https://github.com/b0d0nne11/imf
+bug-reports:         https://github.com/b0d0nne11/imf/issues
+license:             BSD3
+license-file:        LICENSE
+author:              Brendan O'Donnell
+maintainer:          brendan@odonnell.xyz
+copyright:           Copyright (c) 2017-2020, Brendan O'Donnell
+category:            Application, Utils
+build-type:          Simple
+cabal-version:       >= 1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     MailBin.API
+                     , MailBin.DB
+                     , MailBin.MTA
+  build-depends:       base >= 4.7 && < 5
+                     , aeson
+                     , bytestring
+                     , configurator
+                     , imf
+                     , imf-network
+                     , mtl
+                     , resource-pool
+                     , servant-server
+                     , sqlite-simple
+                     , text
+                     , time
+                     , tls
+                     , warp
+  ghc-options:
+  default-language:    Haskell2010
+
+executable mailbin
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  build-depends:       base >= 4.7 && < 5
+                     , mailbin
+                     , configurator
+
+source-repository head
+  type:     git
+  location: https://github.com/b0d0nne11/imf
