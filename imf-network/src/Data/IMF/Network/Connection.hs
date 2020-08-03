@@ -17,6 +17,8 @@ module Data.IMF.Network.Connection
   , tlsServerParams
   , close
     -- * Mail eXchange Specific
+  , lookupMX
+  , sortMX
   , connectMX
     -- * Sending and Receiving
   , send
@@ -35,12 +37,14 @@ where
 
 import           Control.Monad                  (when)
 import           Control.Monad.IO.Unlift        (MonadIO, MonadUnliftIO, liftIO)
+import           Control.Monad.Random.Class     (MonadRandom)
+import           Data.Bifunctor                 (first)
 import           Data.ByteString                (ByteString)
 import qualified Data.ByteString                as B
 import qualified Data.ByteString.Char8          as C
 import qualified Data.ByteString.Lazy           as LB
 import           Data.Default.Class             (def)
-import           Data.List                      (groupBy)
+import           Data.List                      (groupBy, sortOn)
 import           Data.Maybe                     (fromMaybe)
 import           Data.Traversable               (for)
 import           Data.X509.CertificateStore     (CertificateStore)
@@ -52,6 +56,7 @@ import qualified Network.TLS                    as TLS
 import qualified Network.TLS.Extra.Cipher       as TLS
 import qualified Network.TLS.Extra.FFDHE        as TLS
 import           System.IO.Unsafe               (unsafePerformIO)
+import           System.Random.Shuffle          (shuffleM)
 import           System.X509                    (getSystemCertificateStore)
 import           UnliftIO.Exception
 import           UnliftIO.MVar
@@ -138,17 +143,17 @@ resolvSeed :: DNS.ResolvSeed
 resolvSeed = unsafePerformIO $ DNS.makeResolvSeed DNS.defaultResolvConf
 {-# NOINLINE resolvSeed #-}
 
-lookupMX :: MonadIO m => HostName -> m [HostName]
-lookupMX "localhost"   = return ["localhost"]
-lookupMX "example.com" = throwIO $ OperationRefused "example.com is for documentation purposes only"
-lookupMX "example.net" = throwIO $ OperationRefused "example.net is for documentation purposes only"
-lookupMX "example.org" = throwIO $ OperationRefused "example.org is for documentation purposes only"
-lookupMX domain        =
+lookupMX :: MonadIO m => HostName -> m [(HostName, Int)]
+lookupMX domain =
     liftIO $ DNS.withResolver resolvSeed $ \resolver ->
         DNS.lookupMX resolver (DNS.normalize $ C.pack domain) >>= \case
-            Left e   -> throwIO e
-            Right [] -> return [domain]
-            Right rs -> return $ map (C.unpack . fst) $ concat $ groupBy (\(_, p1) (_, p2) -> p1 == p2) rs
+            Left e           -> throwIO e
+            Right [(".", _)] -> throwIO NullMX
+            Right []         -> return [(domain, 0)] -- implicit MX
+            Right rs         -> return $ map (first C.unpack) rs
+
+sortMX :: MonadRandom m => [(HostName, Int)] -> m [(HostName, Int)]
+sortMX = fmap concat . mapM shuffleM . groupBy (\(_, p1) (_, p2) -> p1 == p2) . sortOn snd
 
 tryEach :: MonadUnliftIO m => [m a] -> m a
 tryEach []     = throwIO $ OperationRefused "tryEach requires a non-empty list"
@@ -156,9 +161,9 @@ tryEach [a]    = a
 tryEach (a:as) = a `catchAny` \_ -> tryEach as
 
 -- | Open a new connection to a MX domain
-connectMX :: MonadUnliftIO m => (HostName, ServiceName) -> HostName -> m Connection
+connectMX :: (MonadUnliftIO m, MonadRandom m) => (HostName, ServiceName) -> HostName -> m Connection
 connectMX src domain = do
-    hosts <- lookupMX domain
+    hosts <- map fst <$> (lookupMX domain >>= sortMX)
     tryEach $ flip map hosts $ \host ->
         tryEach $ flip map ["465", "587", "25", "2525"] $ \port -> do
             conn <- connect src (host, port)
@@ -277,6 +282,7 @@ lookAhead Connection{..} =
 -- | Extra connection exceptions in addition to those thrown by Socket/TLS/DNS/etc libraries
 data ConnectionException = OperationRefused String
                          | PeerConnectionClosed
+                         | NullMX
   deriving (Show, Eq)
 
 instance Exception ConnectionException

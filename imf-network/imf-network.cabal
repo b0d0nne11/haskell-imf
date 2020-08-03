@@ -31,8 +31,10 @@ library
                      , bytestring
                      , fast-logger
                      , monad-loops
+                     , MonadRandom
                      , mtl
                      , network
+                     , random-shuffle
                      , text
                      , time
                      , tls
