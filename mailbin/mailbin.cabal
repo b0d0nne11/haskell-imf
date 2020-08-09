@@ -27,6 +27,7 @@ library
                      , resource-pool
                      , servant-server
                      , sqlite-simple
+                     , string-qq
                      , text
                      , time
                      , tls
