@@ -21,6 +21,8 @@ library
                      , aeson
                      , bytestring
                      , configurator
+                     , fast-logger
+                     , http-types
                      , imf
                      , imf-network
                      , mtl
@@ -31,6 +33,7 @@ library
                      , text
                      , time
                      , tls
+                     , wai
                      , warp
   ghc-options:
   default-language:    Haskell2010
@@ -41,6 +44,7 @@ executable mailbin
   build-depends:       base >= 4.7 && < 5
                      , mailbin
                      , configurator
+                     , fast-logger
 
 source-repository head
   type:     git

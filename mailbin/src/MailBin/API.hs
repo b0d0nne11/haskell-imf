@@ -7,15 +7,18 @@ module MailBin.API
   )
 where
 
-import           Control.Monad.IO.Class   (liftIO)
-import           Data.Configurator        (lookupDefault)
-import           Data.Configurator.Types  (Config)
-import           Data.Maybe               (fromMaybe)
-import           Data.Pool                (Pool)
-import           Data.String              (fromString)
-import qualified Database.SQLite.Simple   as DB
+import           Control.Monad.IO.Class    (liftIO)
+import           Data.Configurator         (lookupDefault)
+import           Data.Configurator.Types   (Config)
+import           Data.Maybe                (fromMaybe)
+import           Data.Pool                 (Pool)
+import           Data.String               (fromString)
+import qualified Database.SQLite.Simple    as DB
+import           Network.HTTP.Types.Status (Status (..))
+import           Network.Wai
 import           Network.Wai.Handler.Warp
 import           Servant
+import           System.Log.FastLogger     (FastLogger, toLogStr)
 
 import           MailBin.DB
 
@@ -32,11 +35,25 @@ server dbPool = (\limit offset -> liftIO (selectMail dbPool (fromMaybe 10 limit)
 app :: Pool DB.Connection -> Application
 app dbPool = serve api (server dbPool)
 
-runConfig :: Config -> Application -> IO ()
-runConfig config app = do
+runConfig :: FastLogger -> Config -> Application -> IO ()
+runConfig logger config app = do
     host <- fromString <$> lookupDefault "127.0.0.1" config "host"
     port <- lookupDefault 8080 config "port"
-    runSettings (setHost host $ setPort port defaultSettings) app
+    runSettings (setHost host $ setPort port $ setLogger (logRequest logger) defaultSettings) app
 
-runAPI :: Config -> Pool DB.Connection -> IO ()
-runAPI config dbPool = runConfig config $ app dbPool
+logRequest :: FastLogger -> Request -> Status -> Maybe Integer -> IO ()
+logRequest logger req status size =
+    logger $ "\""
+          <> toLogStr (requestMethod req)
+          <> " "
+          <> toLogStr (rawPathInfo req <> rawQueryString req)
+          <> " "
+          <> toLogStr (show $ httpVersion req)
+          <> "\" "
+          <> toLogStr (show $ statusCode status)
+          <> " "
+          <> toLogStr (maybe "-" show size)
+          <> "\n"
+
+runAPI :: FastLogger -> Config -> Pool DB.Connection -> IO ()
+runAPI logger config dbPool = runConfig logger config $ app dbPool

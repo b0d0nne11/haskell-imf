@@ -24,15 +24,16 @@ import           Data.Text                   (Text)
 import qualified Data.Text.Encoding          as T
 import qualified Database.SQLite.Simple      as DB
 import qualified Network.TLS                 as TLS
+import           System.Log.FastLogger       (FastLogger)
 
 import           MailBin.DB
 
-newServer :: Connection -> TLS.ServerParams -> Pool DB.Connection -> Server
-newServer conn tlsParams dbPool = Server
+newServer :: FastLogger -> Connection -> TLS.ServerParams -> Pool DB.Connection -> Server
+newServer logger conn tlsParams dbPool = Server
     { serverName = "mailbin"
     , serverConnection = conn
     , serverTLSParams = tlsParams
-    , serverLogger = \_ -> return ()
+    , serverLogger = logger
     , serverAuthenticate = \_ _ -> return PermFail
     , serverVerifyReturnPath = \_ -> return Pass
     , serverVerifyRecipient = \_ -> return Pass
@@ -68,12 +69,12 @@ loadTLSParams config = do
     either fail (return . Connection.tlsServerParams) $
         TLS.credentialLoadX509FromMemory crt key
 
-runMTA :: Config -> Pool DB.Connection -> IO ()
-runMTA config dbPool = do
+runMTA :: FastLogger -> Config -> Pool DB.Connection -> IO ()
+runMTA logger config dbPool = do
     conn <- loadConnection config
     tlsParams <- loadTLSParams config
     forever $ Connection.accept conn >>= \conn' ->
-        forkIO $ runReaderT runServer $ newServer conn' tlsParams dbPool
+        forkIO $ runReaderT runServer $ newServer logger conn' tlsParams dbPool
 
 localhostCrt :: ByteString
 localhostCrt = [s|-----BEGIN CERTIFICATE-----
