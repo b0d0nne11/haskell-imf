@@ -14,15 +14,14 @@ module Data.IMF.Network.Client
 where
 
 import           Control.Monad               (join, unless, when)
-import           Control.Monad.IO.Unlift     (MonadUnliftIO, liftIO)
-import           Control.Monad.Reader        (ReaderT, ask, asks)
+import           Control.Monad.IO.Unlift     (liftIO)
+import           Control.Monad.Reader        (ReaderT, asks)
 import qualified Data.Attoparsec.ByteString  as B (IResult (..), Result, parse)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Base64      as B64
 import qualified Data.ByteString.Char8       as C
 import qualified Data.ByteString.Lazy        as LB
-import           Data.Char                   (toLower)
 import           Data.List                   (uncons)
 import           Data.Maybe                  (mapMaybe)
 import           Data.Text                   (Text)

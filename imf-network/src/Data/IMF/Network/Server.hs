@@ -12,11 +12,11 @@ module Data.IMF.Network.Server
 where
 
 import           Control.Monad               (forM_, join, unless, void, when)
-import           Control.Monad.IO.Unlift     (MonadUnliftIO, liftIO)
+import           Control.Monad.IO.Unlift     (liftIO)
 import           Control.Monad.Loops         (iterateUntilM, untilM)
-import           Control.Monad.Reader        (ReaderT, ask, asks, local)
-import qualified Data.Attoparsec.ByteString  as B (IResult (..), Result, parse, parseWith)
-import qualified Data.Attoparsec.Text        as T (IResult (..), Result, parse, parseWith)
+import           Control.Monad.Reader        (ReaderT, ask, asks, local, runReaderT)
+import qualified Data.Attoparsec.ByteString  as B (IResult (..), Result, parse)
+import qualified Data.Attoparsec.Text        as T (IResult (..), parseWith)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Base64      as B64
@@ -142,7 +142,7 @@ sendReply reply = do
 
 formatReply :: (Int, [Text]) -> ByteString
 formatReply (code, [])   = C.pack (show code) <> " " <> "\r\n"
-formatReply (code, l:[]) = C.pack (show code) <> " " <> T.encodeUtf8 l <> "\r\n"
+formatReply (code, [l])  = C.pack (show code) <> " " <> T.encodeUtf8 l <> "\r\n"
 formatReply (code, l:ls) = C.pack (show code) <> "-" <> T.encodeUtf8 l <> "\r\n" <> formatReply (code, ls)
 
 logger :: ToLogStr msg => msg -> ServerM ()
@@ -151,8 +151,8 @@ logger msg = asks serverLogger >>= \log -> liftIO $ log $ toLogStr msg
 redact :: LogStr -> ServerM a -> ServerM a
 redact msg = local $ \s -> s { serverLogger = const $ serverLogger s msg }
 
-runServer :: ServerM ()
-runServer = opening >>= void . iterateUntilM sessionClose loop
+runServer :: Server -> IO ()
+runServer = runReaderT $ opening >>= void . iterateUntilM sessionClose loop
   where
     opening = do
         Server{..} <- ask
@@ -269,7 +269,7 @@ runCommand session@ServerSession{..} (DATA, _) = do
         TempFail  -> throwReply (451, ["Local error in processing"])
         PermFail  -> throwReply (554, ["Transaction failed"])
     return $ session { sessionReturnPath = Nothing, sessionRecipients = [] }
-runCommand session (STARTTLS, _) = do
+runCommand _ (STARTTLS, _) = do
     Server{..} <- ask
     Connection.isSecure serverConnection >>= \secure -> when secure $
         throwReply (502, ["Command not implemented"])
@@ -289,7 +289,8 @@ runCommand session (AUTH, line) = case T.words $ T.strip line of
         Server{..} <- ask
         Connection.isSecure serverConnection >>= \secure -> unless secure $
             throwReply (502, ["Command not implemented"])
-        (user, pass) <- T.split (== '\0') <$> parseBase64 creds >>= \case
+        creds <- parseBase64 creds
+        (user, pass) <- case T.split (== '\0') creds of
             [_, user, pass] -> return (user, pass)
             _               -> throwReply (501, ["Syntax error, credentials unrecognized"])
         liftIO (serverAuthenticate user pass) >>= \case

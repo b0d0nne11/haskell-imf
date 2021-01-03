@@ -6,7 +6,6 @@ module Test.Server where
 
 import           Control.Concurrent          (forkIO)
 import           Control.Monad.IO.Unlift     (MonadIO)
-import           Control.Monad.Reader        (runReaderT)
 import           Data.Attoparsec.ByteString  (Result, count, eitherResult, parseWith)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
@@ -22,7 +21,6 @@ import           UnliftIO.IORef              (atomicModifyIORef', newIORef, read
 import           UnliftIO.MVar               (newEmptyMVar, putMVar, takeMVar)
 
 import           Data.IMF.Network.Connection
-import           Data.IMF.Network.Errors
 import           Data.IMF.Network.Parsers
 import           Data.IMF.Network.Server
 
@@ -137,7 +135,7 @@ testConnect = testCase "connect/disconnect" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< QUIT\r\n"
@@ -164,7 +162,7 @@ testSimpleChat = testCase "simple chat" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -197,7 +195,7 @@ testPipelinedChat = testCase "pipelined chat" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -239,7 +237,7 @@ testSecuredChat = testCase "secured chat" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -281,7 +279,7 @@ testAuthPlain = testCase "authenticate (plain)" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -318,7 +316,7 @@ testAuthPlainInit = testCase "authenticate (plain with initial)" $
         return ()
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -356,7 +354,7 @@ testAuthLogin = testCase "authenticate (login)" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -396,7 +394,7 @@ testAuthLoginInit = testCase "authenticate (login with initial)" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -421,7 +419,7 @@ testPeerConnectionClosed = testCase "peer connection closed" $
         fst <$> recvReply conn >>= (@?= 220)
     serverAct server = do
         log <- withMemLogger $ \logger -> do
-            r <- try $ runReaderT runServer $ server { serverLogger = logger }
+            r <- try $ runServer $ server { serverLogger = logger }
             r @?= Left PeerConnectionClosed
         log @?= B.concat ["> 220 mx1.example.com Service ready\r\n"]
 
@@ -436,7 +434,7 @@ testCommandUnrecognized = testCase "command unrecognized" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< FOO\r\n"
@@ -456,7 +454,7 @@ testCommandOutOfOrder = testCase "command out of order" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< MAIL FROM:<no-reply@example.com>\r\n"
@@ -478,7 +476,7 @@ testParameterNotImplemented = testCase "parameter not implemented" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -502,7 +500,7 @@ testReturnPathUnrecognized = testCase "return path mailbox unrecognized" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverVerifyReturnPath = \_ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverVerifyReturnPath = \_ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -526,7 +524,7 @@ testReturnPathUnavailable = testCase "return path mailbox unavailable" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverVerifyReturnPath = \_ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverVerifyReturnPath = \_ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -552,7 +550,7 @@ testRecipientUnrecognized = testCase "recipient mailbox unrecognized" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverVerifyRecipient = \_ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverVerifyRecipient = \_ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -580,7 +578,7 @@ testRecipientUnavailable = testCase "recipient mailbox unavailable" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverVerifyRecipient = \_ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverVerifyRecipient = \_ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -610,7 +608,7 @@ testTooManyRecipients = testCase "too many recipients" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverMaxRecipients = 1 }
+            runServer $ server { serverLogger = logger, serverMaxRecipients = 1 }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -644,7 +642,7 @@ testMessageUnrecognized = testCase "message unrecognized" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -681,7 +679,7 @@ testMessageTooLarge = testCase "message too large" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverMaxMessageSize = 1 }
+            runServer $ server { serverLogger = logger, serverMaxMessageSize = 1 }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -725,7 +723,7 @@ testMessageTansactionFailed = testCase "message transaction failed" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverAcceptMessage = \_ _ _ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverAcceptMessage = \_ _ _ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -757,7 +755,7 @@ testNoValidRecipients = testCase "no valid recipients" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -788,7 +786,7 @@ testCredentialsUnrecognized = testCase "credentials unrecognized" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger }
+            runServer $ server { serverLogger = logger }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -822,7 +820,7 @@ testCredentialsInvalid = testCase "credentials invalid" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverAuthenticate = \_ _ -> return PermFail }
+            runServer $ server { serverLogger = logger, serverAuthenticate = \_ _ -> return PermFail }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -851,7 +849,7 @@ testAuthenticationRequired = testCase "authentication required" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverReqAuth = True }
+            runServer $ server { serverLogger = logger, serverReqAuth = True }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"
@@ -875,7 +873,7 @@ testEncryptionRequired = testCase "encryption required" $
         fst <$> recvReply conn >>= (@?= 221)
     serverAct server = do
         log <- withMemLogger $ \logger ->
-            runReaderT runServer $ server { serverLogger = logger, serverReqTLS = True }
+            runServer $ server { serverLogger = logger, serverReqTLS = True }
         log @?= B.concat
             [ "> 220 mx1.example.com Service ready\r\n"
             , "< EHLO relay.example.com\r\n"

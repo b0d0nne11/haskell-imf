@@ -7,6 +7,7 @@
 module Data.IMF.Network.Connection
   ( -- * Connection Management
     Connection
+  , fromSocket
   , connect
   , listen
   , accept
@@ -35,31 +36,30 @@ module Data.IMF.Network.Connection
   )
 where
 
-import           Control.Monad                  (when)
-import           Control.Monad.IO.Unlift        (MonadIO, MonadUnliftIO, liftIO)
-import           Control.Monad.Random.Class     (MonadRandom)
-import           Data.Bifunctor                 (first)
-import           Data.ByteString                (ByteString)
-import qualified Data.ByteString                as B
-import qualified Data.ByteString.Char8          as C
-import qualified Data.ByteString.Lazy           as LB
-import           Data.Default.Class             (def)
-import           Data.List                      (groupBy, sortOn)
-import           Data.Maybe                     (fromMaybe)
-import           Data.Traversable               (for)
-import           Data.X509.CertificateStore     (CertificateStore)
-import qualified Network.DNS                    as DNS
-import           Network.Socket                 (HostName, ServiceName, Socket)
-import qualified Network.Socket                 as Socket hiding (recv, sendAll)
-import qualified Network.Socket.ByteString      as Socket (recv, sendAll)
-import qualified Network.TLS                    as TLS
-import qualified Network.TLS.Extra.Cipher       as TLS
-import qualified Network.TLS.Extra.FFDHE        as TLS
-import           System.IO.Unsafe               (unsafePerformIO)
-import           System.Random.Shuffle          (shuffleM)
-import           System.X509                    (getSystemCertificateStore)
-import           UnliftIO.Exception
-import           UnliftIO.MVar
+import           Control.Monad              (when)
+import           Control.Monad.IO.Unlift    (MonadIO, MonadUnliftIO, liftIO)
+import           Control.Monad.Random.Class (MonadRandom)
+import           Data.Bifunctor             (first)
+import           Data.ByteString            (ByteString)
+import qualified Data.ByteString            as B
+import qualified Data.ByteString.Char8      as C
+import qualified Data.ByteString.Lazy       as LB
+import           Data.Default.Class         (def)
+import           Data.List                  (groupBy, sortOn)
+import           Data.Maybe                 (fromMaybe)
+import           Data.X509.CertificateStore (CertificateStore)
+import qualified Network.DNS                as DNS
+import           Network.Socket             (HostName, ServiceName, Socket)
+import qualified Network.Socket             as Socket hiding (recv, sendAll)
+import qualified Network.Socket.ByteString  as Socket (recv, sendAll)
+import qualified Network.TLS                as TLS
+import qualified Network.TLS.Extra.Cipher   as TLS
+import qualified Network.TLS.Extra.FFDHE    as TLS
+import           System.IO.Unsafe           (unsafePerformIO)
+import           System.Random.Shuffle      (shuffleM)
+import           System.X509                (getSystemCertificateStore)
+import           UnliftIO.Exception         (Exception, catchAny, throwIO)
+import           UnliftIO.MVar              (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
 import           UnliftIO.Timeout
 
 data Connection = Connection
@@ -72,6 +72,14 @@ data Connection = Connection
 
 data Backend = ConnectionSocket Socket
              | ConnectionTLS TLS.Context
+
+fromSocket :: MonadIO m => Socket -> m Connection
+fromSocket sock =
+    Connection <$> newMVar (ConnectionSocket sock)
+               <*> newMVar ""
+               <*> newMVar ""
+               <*> liftIO (Socket.getSocketName sock)
+               <*> liftIO (Just <$> Socket.getPeerName sock)
 
 rawRecv :: MonadUnliftIO m => MVar Backend -> m ByteString
 rawRecv backend =

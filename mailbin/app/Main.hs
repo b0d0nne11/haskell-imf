@@ -2,18 +2,31 @@
 
 module Main where
 
-import Control.Concurrent    (forkIO)
-import Data.Configurator     (Worth (..), load, subconfig)
-import System.Log.FastLogger (LogType' (..), newFastLogger)
+import Control.Concurrent    (newEmptyMVar, putMVar, takeMVar)
+import System.Log.FastLogger (LogType' (..), withFastLogger)
+import System.Posix.Signals  (Handler (..), Signal, installHandler, sigINT)
 
 import MailBin.API
+import MailBin.Config
 import MailBin.DB
 import MailBin.MTA
 
 main :: IO ()
-main = do
-    (logger, _) <- newFastLogger $ LogStdout 0
-    config <- load [Optional "mailbin.cfg"]
+main =  withFastLogger (LogStdout 4096) $ \logger -> do
+    config <- loadConfig
     dbPool <- setupDB $ subconfig "db" config
-    _ <- forkIO $ runMTA (logger . ("[mailbin.mta] " <>)) (subconfig "mta" config) dbPool
-    runAPI (logger . ("[mailbin.api] " <>)) (subconfig "api" config) dbPool
+    closeMTA <- runMTA (subconfig "mta" config) logger dbPool
+    closeAPI <- runAPI (subconfig "api" config) logger dbPool
+    logger "ready\n"
+    waitFor sigINT
+    logger "caught interrupt signal, shutting down\n"
+    closeAPI
+    closeMTA
+    closeDB dbPool
+    logger "done\n"
+
+waitFor :: Signal -> IO ()
+waitFor sig = do
+    done <- newEmptyMVar
+    installHandler sig (CatchOnce $ putMVar done ()) Nothing
+    takeMVar done
