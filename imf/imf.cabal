@@ -21,7 +21,7 @@ library
                      , Data.IMF.MessageId
                      , Data.IMF.Time
                      , Data.IMF.Types
-  build-depends:       base >= 4.7 && < 5
+  build-depends:       base >= 4.13 && < 5
                      , random
                      , text
                      , time

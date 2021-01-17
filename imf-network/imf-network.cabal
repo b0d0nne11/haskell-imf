@@ -21,7 +21,7 @@ library
                      , Data.IMF.Network.Errors
                      , Data.IMF.Network.Parsers
                      , Data.IMF.Network.Server
-  build-depends:       base >= 4.7 && < 5
+  build-depends:       base >= 4.13 && < 5
                      , imf
                      , imf-parsers
                      , attoparsec
