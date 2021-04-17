@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Moved to the PolyForm Noncommercial License 1.0.0
 - `connectMX` now randomly shuffles MX records at the same priority level
 - Bump the minimum base version to 4.13 (ghc version 8.8)
+- Bump the minimum base version again to 4.14 (ghc version 8.10)
 
 ## [0.7.0] - 2020-07-19
 ### Added
