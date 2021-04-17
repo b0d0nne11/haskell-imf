@@ -6,9 +6,7 @@
 module Test.Client where
 
 import           Control.Concurrent          (forkIO)
-import           Control.Monad.IO.Unlift     (MonadIO)
 import           Control.Monad.Reader        (runReaderT)
-import           Data.Attoparsec.ByteString  (Result, eitherResult, parseWith)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Lazy        as LB
@@ -25,8 +23,6 @@ import           UnliftIO.MVar               (newEmptyMVar, putMVar, takeMVar)
 import           Data.IMF
 import           Data.IMF.Network.Client
 import           Data.IMF.Network.Connection
-import           Data.IMF.Network.Errors
-import           Data.IMF.Network.Parsers
 
 tests :: TestTree
 tests = testGroup "client"
@@ -50,13 +46,13 @@ clientTest clientAct serverAct = do
         bracket (accept conn) close serverAct
     client sync = do
         takeMVar sync
-        bracket (newClient <$> connect ("0.0.0.0", "0") ("127.0.0.1", "2525")) (close . clientConnection) clientAct
-    newClient conn = Client
-        { clientName        = "relay.example.com"
-        , clientConnection  = conn
-        , clientTLSParams   = tlsClientParams "localhost" False
-        , clientLogger      = const $ return ()
-        , clientCredentials = Nothing
+        connect ("0.0.0.0", "0") ("127.0.0.1", "2525") >>= newClient' "relay.example.com" >>= clientAct
+
+newClient' :: Text -> Connection -> IO Client
+newClient' name conn = do
+    client <- newClient name conn
+    return $ client
+        { clientTLSParams = tlsClientParams "localhost" False
         }
 
 testMessage :: LB.ByteString
@@ -80,21 +76,12 @@ withMemLogger f = do
     (logger, reader) <- newMemLogger
     f logger >> reader
 
-recvLine :: Connection -> IO ByteString
-recvLine conn = parseWith (recv conn) pLine "" >>= fromResult
-
-recvData :: Connection -> IO ByteString
-recvData conn = parseWith (recv conn) pData "" >>= fromResult
-
-fromResult :: MonadIO m => Result a -> m a
-fromResult = either throwString return . eitherResult
-
 testHello = testCase "init (ehlo)" $
     clientTest clientAct serverAct
   where
     serverAct conn = do
         send conn "220 smtp.example.com ESMTP Postfix\r\n"
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250-SIZE 14680064\r\n250 HELP\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger -> do
@@ -105,7 +92,9 @@ testHello = testCase "init (ehlo)" $
         log @?= B.concat
             [ "< 220 smtp.example.com ESMTP Postfix\r\n"
             , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n250-SIZE 14680064\r\n250 HELP\r\n"
+            , "< 250-smtp.example.com\r\n"
+            , "< 250-SIZE 14680064\r\n"
+            , "< 250 HELP\r\n"
             ]
 
 testHelloFallback = testCase "init (helo)" $
@@ -113,9 +102,9 @@ testHelloFallback = testCase "init (helo)" $
   where
     serverAct conn = do
         send conn "220 smtp.example.com ESMTP Postfix\r\n"
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "502 Command not implemented\r\n"
-        recvLine conn >>= (@?= "HELO relay.example.com\r\n")
+        recvLine conn >>= (@?= "HELO relay.example.com\r")
         send conn "250 smtp.example.com, I am glad to meet you\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger -> do
@@ -136,12 +125,12 @@ testStartTLS = testCase "init (ehlo + starttls)" $
   where
     serverAct conn = do
         send conn "220 smtp.example.com ESMTP Postfix\r\n"
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250 STARTTLS\r\n"
-        recvLine conn >>= (@?= "STARTTLS\r\n")
+        recvLine conn >>= (@?= "STARTTLS\r")
         send conn "220 Go ahead\r\n"
         secure conn $ tlsServerParams testCertificate
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250 STARTTLS\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger -> do
@@ -153,12 +142,13 @@ testStartTLS = testCase "init (ehlo + starttls)" $
             [ "< 220 smtp.example.com ESMTP Postfix\r\n"
             , "> EHLO relay.example.com\r\n"
             , "< 250-smtp.example.com\r\n"
-            ,   "250 STARTTLS\r\n"
+            , "< 250 STARTTLS\r\n"
             , "> STARTTLS\r\n"
             , "< 220 Go ahead\r\n"
-            , ". [tls handshake]\r\n"
+            , "- [tls handshake]\n"
             , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n250 STARTTLS\r\n"
+            , "< 250-smtp.example.com\r\n"
+            , "< 250 STARTTLS\r\n"
             ]
 
 testAuthLogin = testCase "init (ehlo + starttls + login)" $
@@ -166,18 +156,18 @@ testAuthLogin = testCase "init (ehlo + starttls + login)" $
   where
     serverAct conn = do
         send conn "220 smtp.example.com ESMTP Postfix\r\n"
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250 STARTTLS\r\n"
-        recvLine conn >>= (@?= "STARTTLS\r\n")
+        recvLine conn >>= (@?= "STARTTLS\r")
         send conn "220 Go ahead\r\n"
         secure conn $ tlsServerParams testCertificate
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n"
-        recvLine conn >>= (@?= "AUTH LOGIN\r\n")
+        recvLine conn >>= (@?= "AUTH LOGIN\r")
         send conn "334 VXNlcm5hbWU6\r\n"
-        recvLine conn >>= (@?= "dXNlcm5hbWU=\r\n")
+        recvLine conn >>= (@?= "dXNlcm5hbWU=\r")
         send conn "334 UGFzc3dvcmQ6\r\n"
-        recvLine conn >>= (@?= "cGFzc3dvcmQ=\r\n")
+        recvLine conn >>= (@?= "cGFzc3dvcmQ=\r")
         send conn "235 Authentication successful.\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger -> do
@@ -189,14 +179,14 @@ testAuthLogin = testCase "init (ehlo + starttls + login)" $
             [ "< 220 smtp.example.com ESMTP Postfix\r\n"
             , "> EHLO relay.example.com\r\n"
             , "< 250-smtp.example.com\r\n"
-            ,   "250 STARTTLS\r\n"
+            , "< 250 STARTTLS\r\n"
             , "> STARTTLS\r\n"
             , "< 220 Go ahead\r\n"
-            , ". [tls handshake]\r\n"
+            , "- [tls handshake]\n"
             , "> EHLO relay.example.com\r\n"
             , "< 250-smtp.example.com\r\n"
-            ,   "250-STARTTLS\r\n"
-            ,   "250 AUTH LOGIN\r\n"
+            , "< 250-STARTTLS\r\n"
+            , "< 250 AUTH LOGIN\r\n"
             , "> AUTH LOGIN\r\n"
             , "< 334 VXNlcm5hbWU6\r\n"
             , "> dXNlcm5hbWU=\r\n"
@@ -210,14 +200,14 @@ testAuthPlain = testCase "init (ehlo + starttls + plain)" $
   where
     serverAct conn = do
         send conn "220 smtp.example.com ESMTP Postfix\r\n"
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250 STARTTLS\r\n"
-        recvLine conn >>= (@?= "STARTTLS\r\n")
+        recvLine conn >>= (@?= "STARTTLS\r")
         send conn "220 Go ahead\r\n"
         secure conn $ tlsServerParams testCertificate
-        recvLine conn >>= (@?= "EHLO relay.example.com\r\n")
+        recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n"
-        recvLine conn >>= (@?= "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r\n")
+        recvLine conn >>= (@?= "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r")
         send conn "235 Authentication successful.\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger -> do
@@ -229,14 +219,14 @@ testAuthPlain = testCase "init (ehlo + starttls + plain)" $
             [ "< 220 smtp.example.com ESMTP Postfix\r\n"
             , "> EHLO relay.example.com\r\n"
             , "< 250-smtp.example.com\r\n"
-            ,   "250 STARTTLS\r\n"
+            , "< 250 STARTTLS\r\n"
             , "> STARTTLS\r\n"
             , "< 220 Go ahead\r\n"
-            , ". [tls handshake]\r\n"
+            , "- [tls handshake]\n"
             , "> EHLO relay.example.com\r\n"
             , "< 250-smtp.example.com\r\n"
-            ,   "250-STARTTLS\r\n"
-            ,   "250 AUTH PLAIN\r\n"
+            , "< 250-STARTTLS\r\n"
+            , "< 250 AUTH PLAIN\r\n"
             , "> AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r\n"
             , "< 235 Authentication successful.\r\n"
             ]
@@ -245,11 +235,11 @@ testDeliver = testCase "deliver" $
     clientTest clientAct serverAct
   where
     serverAct conn = do
-        recvLine conn >>= (@?= "MAIL FROM:<matt@localhost>\r\n")
+        recvLine conn >>= (@?= "MAIL FROM:<matt@localhost>\r")
         send conn "250 Ok\r\n"
-        recvLine conn >>= (@?= "RCPT TO:<mary@localhost>\r\n")
+        recvLine conn >>= (@?= "RCPT TO:<mary@localhost>\r")
         send conn "250 Ok\r\n"
-        recvLine conn >>= (@?= "DATA\r\n")
+        recvLine conn >>= (@?= "DATA\r")
         send conn "354 End data with <CR><LF>.<CR><LF>\r\n"
         _ <- recvData conn
         send conn "250 Ok: queued as 12345\r\n"
@@ -263,14 +253,7 @@ testDeliver = testCase "deliver" $
             , "< 250 Ok\r\n"
             , "> DATA\r\n"
             , "< 354 End data with <CR><LF>.<CR><LF>\r\n"
-            , "> From: John Doe <jdoe@machine.example>\n"
-            ,   "To: Mary Smith <mary@example.net>\n"
-            ,   "Subject: Saying Hello\n"
-            ,   "Date: Fri, 21 Nov 1997 09:55:06 -0600\n"
-            ,   "Message-ID: <1234@local.machine.example>\n"
-            ,   "\n"
-            ,   "This is a message just to say hello.\n"
-            ,   "So, \"Hello\".\n"
+            , "> [224 bytes]\n"
             , "> .\r\n"
             , "< 250 Ok: queued as 12345\r\n"
             ]
@@ -279,7 +262,7 @@ testQuit = testCase "quit" $
     clientTest clientAct serverAct
   where
     serverAct conn = do
-        recvLine conn >>= (@?= "QUIT\r\n")
+        recvLine conn >>= (@?= "QUIT\r")
         send conn "221 Bye\r\n"
     clientAct client = do
         log <- withMemLogger $ \logger ->
@@ -287,4 +270,5 @@ testQuit = testCase "quit" $
         log @?= B.concat
             [ "> QUIT\r\n"
             , "< 221 Bye\r\n"
+            , "- [closing connection]\n"
             ]

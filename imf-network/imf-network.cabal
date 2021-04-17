@@ -19,7 +19,6 @@ library
                      , Data.IMF.Network.Command
                      , Data.IMF.Network.Connection
                      , Data.IMF.Network.Errors
-                     , Data.IMF.Network.Parsers
                      , Data.IMF.Network.Server
   build-depends:       base >= 4.14 && < 5
                      , imf

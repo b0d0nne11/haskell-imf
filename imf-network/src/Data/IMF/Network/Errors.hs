@@ -5,7 +5,6 @@ module Data.IMF.Network.Errors
     , throwReply
     , catchReply
     , handleReply
-    , ParseException(..)
     )
 where
 
@@ -36,9 +35,3 @@ catchReply = catchJust (\(ReplyException r) -> Just r)
 
 handleReply :: MonadUnliftIO m => ((Int, [Text]) -> m a) -> m a -> m a
 handleReply = flip catchReply
-
-data ParseException = ParseSizeExceeded
-                    | ParseFailure String
-  deriving (Show, Eq)
-
-instance Exception ParseException

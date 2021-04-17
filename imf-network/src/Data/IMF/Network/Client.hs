@@ -7,16 +7,16 @@
 module Data.IMF.Network.Client
   ( Client(..)
   , ClientSession(..)
+  , newClient
   , setup
   , deliver
   , quit
   )
 where
 
-import           Control.Monad               (join, unless, when)
+import           Control.Monad               (forM_, when, unless)
 import           Control.Monad.IO.Unlift     (liftIO)
-import           Control.Monad.Reader        (ReaderT, asks)
-import qualified Data.Attoparsec.ByteString  as B (IResult (..), Result, parse)
+import           Control.Monad.Reader        (ReaderT, ask, asks)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString             as B
 import qualified Data.ByteString.Base64      as B64
@@ -26,16 +26,14 @@ import           Data.List                   (uncons)
 import           Data.Maybe                  (mapMaybe)
 import           Data.Text                   (Text)
 import qualified Data.Text                   as T
-import           Data.Text.Encoding          as T
+import qualified Data.Text.Encoding          as T
 import qualified Network.TLS                 as TLS
-import           System.Log.FastLogger
-import           UnliftIO.Exception          (throwIO)
+import           System.Log.FastLogger       (LogStr, ToLogStr (..))
 
 import           Data.IMF
 import           Data.IMF.Network.Connection (Connection)
 import qualified Data.IMF.Network.Connection as Connection
 import           Data.IMF.Network.Errors
-import           Data.IMF.Network.Parsers
 
 type ClientM = ReaderT Client IO
 
@@ -47,6 +45,16 @@ data Client = Client
     , clientCredentials :: Maybe (Text, Text)
     }
 
+newClient :: Text -> Connection -> IO Client
+newClient name conn =
+    return $ Client
+        { clientName        = name
+        , clientConnection  = conn
+        , clientTLSParams   = TLS.defaultParamsClient "localhost" ""
+        , clientLogger      = \_ -> return ()
+        , clientCredentials = Nothing
+        }
+
 data ClientSession = ClientSession
     { sessionBanner     :: Text
     , sessionGreeting   :: Text
@@ -57,38 +65,40 @@ data ClientSession = ClientSession
 
 type Extention = (Text, [Text])
 
-recvParsed :: (ByteString -> B.Result a) -> Int -> ClientM a
-recvParsed parse limit = do
-    when (limit < 0) $ throwIO ParseSizeExceeded
-    join $ recv' $ \chunk -> case parse chunk of
-        B.Fail chunk' _ err -> do
-            logger . ("< " <>) $ B.take (B.length chunk - B.length chunk') chunk
-            return (chunk', throwIO $ ParseFailure err)
-        B.Partial parse' -> do
-            logger . ("< " <>) $ chunk
-            return ("", recvParsed parse' $ limit - B.length chunk)
-        B.Done chunk' a -> do
-            logger . ("< " <>) $ B.take (B.length chunk - B.length chunk') chunk
-            return (chunk', return a)
-  where
-    recv' f = asks clientConnection >>= \conn -> Connection.recv' conn f
-
 recvReply :: ClientM (Int, [Text])
-recvReply = recvParsed (B.parse pReply) 4096 >>= checkReply
+recvReply = do
+    Client{..} <- ask
+    (chunk, r@(rcode, _)) <- Connection.recvReply clientConnection
+    forM_ (C.lines chunk) $ \line -> logger $ "< " <> line
+    when (rcode > 399) $ throwReply r
+    return r
 
-checkReply :: (Int, [Text]) -> ClientM (Int, [Text])
-checkReply r@(code, _)
-    | 200 <= code && code <= 399 = return r
-    | otherwise                  = throwReply r
+sendLine :: ByteString -> ClientM ()
+sendLine line = do
+    Client{..} <- ask
+    Connection.sendLine clientConnection line
+    logger $ "> " <> line
 
-send :: ByteString -> ClientM ()
-send chunk = do
-    conn <- asks clientConnection
-    Connection.send conn chunk
-    logger . ("> " <>) $ chunk
+sendData :: LB.ByteString -> ClientM ()
+sendData msg = do
+    Client{..} <- ask
+    Connection.send clientConnection msg
+    logger $ "> [" <> show (LB.length msg) <> " bytes]"
+
+secure :: ClientM ()
+secure = do
+    Client{..} <- ask
+    Connection.secure clientConnection clientTLSParams
+    logger ("- [tls handshake]" :: String)
+
+close :: ClientM ()
+close = do
+    Client{..} <- ask
+    Connection.close clientConnection
+    logger ("- [closing connection]" :: String)
 
 logger :: ToLogStr msg => msg -> ClientM ()
-logger msg = asks clientLogger >>= \log -> liftIO $ log $ toLogStr msg
+logger msg = asks clientLogger >>= \log -> liftIO $ log $ toLogStr msg <> "\n"
 
 setup :: ClientM ClientSession
 setup = opening >>= opportunisticTLS >>= authenticate
@@ -102,7 +112,7 @@ setup = opening >>= opportunisticTLS >>= authenticate
         connIsSecure <- asks clientConnection >>= Connection.isSecure
         case (connIsSecure, "starttls" `lookup` sessionExtentions) of
             (False, Just _) -> do
-                asks clientTLSParams >>= startTLS
+                startTLS
                 (sessionGreeting, sessionExtentions) <- hello
                 return ClientSession{..}
             _ ->
@@ -127,13 +137,16 @@ deliver returnPath recipients msg = do
 
 -- | Verify the server banner
 banner :: ClientM Text
-banner = T.unwords . snd <$> cuttoff 300 recvReply
+banner =
+    cuttoff 300 recvReply >>= \case
+        (_, [])  -> return ""
+        (_, l:_) -> return l
 
 -- | Send the HELO command
 helo :: ClientM (Text, [Extention])
 helo = do
     name <- asks clientName
-    send $ "HELO " <> T.encodeUtf8 name <> "\r\n"
+    sendLine $ "HELO " <> T.encodeUtf8 name <> "\r"
     cuttoff 300 recvReply >>= \case
         (_, [])         -> return ("", [])
         (_, greeting:_) -> return (greeting, [])
@@ -142,10 +155,10 @@ helo = do
 ehlo :: ClientM (Text, [Extention])
 ehlo = do
     name <- asks clientName
-    send $ "EHLO " <> T.encodeUtf8 name <> "\r\n"
+    sendLine $ "EHLO " <> T.encodeUtf8 name <> "\r"
     cuttoff 300 recvReply >>= \case
-        (_, [])             -> return ("", [])
-        (_, greeting:lines) -> return (greeting, toExtentions lines)
+        (_, [])          -> return ("", [])
+        (_, greeting:ls) -> return (greeting, toExtentions ls)
   where
     toExtentions = mapMaybe (uncons . T.words . T.toLower)
 
@@ -154,26 +167,24 @@ hello :: ClientM (Text, [Extention])
 hello = ehlo `catchReply` const helo
 
 -- | Send the STARTTLS command and negotiate TLS context
-startTLS :: TLS.ClientParams -> ClientM ()
-startTLS tlsParams = do
-    send "STARTTLS\r\n"
+startTLS :: ClientM ()
+startTLS = do
+    sendLine "STARTTLS\r"
     _ <- cuttoff 120 recvReply
-    logger (". [tls handshake]\r\n" :: String)
-    conn <- asks clientConnection
-    Connection.secure conn tlsParams
+    secure
 
 auth :: [Text] -> (Text, Text) -> ClientM (Maybe Text)
 auth methods (username, password)
     | "login" `elem` methods = do
-        send "AUTH LOGIN\r\n"
+        sendLine "AUTH LOGIN\r"
         _ <- cuttoff 120 recvReply
-        send $ B64.encode (T.encodeUtf8 username) <> "\r\n"
+        sendLine $ B64.encode (T.encodeUtf8 username) <> "\r"
         _ <- cuttoff 120 recvReply
-        send $ B64.encode (T.encodeUtf8 password) <> "\r\n"
+        sendLine $ B64.encode (T.encodeUtf8 password) <> "\r"
         _ <- cuttoff 120 recvReply
         return $ Just username
     | "plain" `elem` methods = do
-        send $ "AUTH PLAIN " <> B64.encode (B.concat [T.encodeUtf8 username, C.singleton '\0', T.encodeUtf8 username, C.singleton '\0', T.encodeUtf8 password]) <> "\r\n"
+        sendLine $ "AUTH PLAIN " <> B64.encode (B.concat [T.encodeUtf8 username, C.singleton '\0', T.encodeUtf8 username, C.singleton '\0', T.encodeUtf8 password]) <> "\r"
         _ <- cuttoff 120 recvReply
         return $ Just username
     | otherwise =
@@ -182,40 +193,40 @@ auth methods (username, password)
 -- | Send the MAIL FROM command
 mailFrom :: Mailbox -> ClientM ()
 mailFrom returnPath = do
-    send $ "MAIL FROM:<" <> T.encodeUtf8 (format $ AddrSpec returnPath) <> ">\r\n"
+    sendLine $ "MAIL FROM:<" <> T.encodeUtf8 (format $ AddrSpec returnPath) <> ">\r"
     _ <- cuttoff 300 recvReply
     return ()
 
 -- | Send the RCPT TO command
 rcptTo :: Mailbox -> ClientM ()
 rcptTo recipient = do
-    send $ "RCPT TO:<" <> T.encodeUtf8 (format $ AddrSpec recipient) <> ">\r\n"
+    sendLine $ "RCPT TO:<" <> T.encodeUtf8 (format $ AddrSpec recipient) <> ">\r"
     _ <- cuttoff 300 recvReply
     return ()
 
 -- | Send the DATA command
 dataInit :: ClientM ()
 dataInit = do
-    send "DATA\r\n"
+    sendLine "DATA\r"
     _ <- cuttoff 120 recvReply
     return ()
 
 -- | Send the data block
 dataBlock :: LB.ByteString -> ClientM ()
 dataBlock msg = do
-    mapM_ send $ LB.toChunks msg
-    unless ("\n" `LB.isSuffixOf` msg) $ send "\r\n"
+    sendData msg
+    unless (LB.last msg == 10) $ sendLine "\r"
 
 -- | Terminate the data block
 dataTerm :: ClientM ()
 dataTerm = do
-    send ".\r\n"
+    sendLine ".\r"
     _ <- cuttoff 600 recvReply
     return ()
 
 -- | Send the QUIT command
 quit :: ClientM ()
 quit = do
-    send "QUIT\r\n"
+    sendLine "QUIT\r"
     _ <- cuttoff 120 recvReply
-    return ()
+    close

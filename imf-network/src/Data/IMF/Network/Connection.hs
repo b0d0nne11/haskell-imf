@@ -2,54 +2,66 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
 
+{-# LANGUAGE TupleSections #-}
 module Data.IMF.Network.Connection
-  ( -- * Connection Management
-    Connection
+  ( Connection
   , fromSocket
+    -- * Connection Management
   , connect
   , listen
   , accept
-  , secure
-  , isSecure
-  , tlsInfo
-  , tlsClientParams
-  , tlsServerParams
   , close
     -- * Mail eXchange Specific
   , lookupMX
   , sortMX
   , connectMX
+    -- * TLS
+  , secure
+  , isSecure
+  , tlsInfo
+  , tlsClientParams
+  , tlsServerParams
     -- * Sending and Receiving
   , send
-  , put
-  , flush
+  , sendLine
+  , sendLines
   , recv
-  , recv'
-  , lookAhead
+  , recvLine
+  , recvLines
+  , recvData
+  , recvReply
     -- * Exceptions
   , ConnectionException(..)
     -- * Re-exports
   , HostName
   , ServiceName
+  , Socket
+  , SockAddr
   )
 where
 
-import           Control.Monad              (when)
+import qualified Data.Attoparsec.ByteString as AP
+import qualified Data.Attoparsec.ByteString.Char8 as AP (decimal)
+import qualified Data.Attoparsec.Combinator as AP
+import           Control.Applicative        (many, liftA2)
+import           Control.Monad.Loops        (unfoldWhileM)
+import           Control.Monad              (join, when)
 import           Control.Monad.IO.Unlift    (MonadIO, MonadUnliftIO, liftIO)
-import           Control.Monad.Random.Class (MonadRandom)
 import           Data.Bifunctor             (first)
 import           Data.ByteString            (ByteString)
 import qualified Data.ByteString            as B
+import qualified Data.ByteString.Builder    as BB
 import qualified Data.ByteString.Char8      as C
 import qualified Data.ByteString.Lazy       as LB
 import           Data.Default.Class         (def)
-import           Data.List                  (groupBy, sortOn)
-import           Data.Maybe                 (fromMaybe)
+import           Data.Foldable              (asum)
+import           Data.List                  (intercalate, groupBy, sortOn)
+import           Data.Text                  (Text)
+import qualified Data.Text.Encoding         as T
 import           Data.X509.CertificateStore (CertificateStore)
 import qualified Network.DNS                as DNS
-import           Network.Socket             (HostName, ServiceName, Socket)
+import           Network.Socket             (HostName, ServiceName, Socket, SockAddr)
 import qualified Network.Socket             as Socket hiding (recv, sendAll)
 import qualified Network.Socket.ByteString  as Socket (recv, sendAll)
 import qualified Network.TLS                as TLS
@@ -58,16 +70,13 @@ import qualified Network.TLS.Extra.FFDHE    as TLS
 import           System.IO.Unsafe           (unsafePerformIO)
 import           System.Random.Shuffle      (shuffleM)
 import           System.X509                (getSystemCertificateStore)
-import           UnliftIO.Exception         (Exception, catchAny, throwIO)
+import           UnliftIO.Exception         (Exception, throwIO)
 import           UnliftIO.MVar              (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
-import           UnliftIO.Timeout
+import           UnliftIO.Timeout           (timeout)
 
 data Connection = Connection
     { connBackend    :: MVar Backend
     , connRecvBuffer :: MVar ByteString
-    , connSendBuffer :: MVar ByteString
-    , connSocketAddr :: Socket.SockAddr
-    , connPeerAddr   :: Maybe Socket.SockAddr
     }
 
 data Backend = ConnectionSocket Socket
@@ -77,105 +86,107 @@ fromSocket :: MonadIO m => Socket -> m Connection
 fromSocket sock =
     Connection <$> newMVar (ConnectionSocket sock)
                <*> newMVar ""
-               <*> newMVar ""
-               <*> liftIO (Socket.getSocketName sock)
-               <*> liftIO (Just <$> Socket.getPeerName sock)
 
 rawRecv :: MonadUnliftIO m => MVar Backend -> m ByteString
-rawRecv backend =
-    withMVar backend $ \case
-        ConnectionSocket sock -> liftIO $ Socket.recv sock 4096
-        ConnectionTLS ctx     -> liftIO $ TLS.recvData ctx
+rawRecv backend = do
+    chunk <- liftIO $ withMVar backend $ \case
+        ConnectionSocket sock -> Socket.recv sock 4096
+        ConnectionTLS ctx     -> TLS.recvData ctx
+    when (B.null chunk) $ throwIO PeerConnectionClosed
+    return chunk
 
 rawSend :: MonadUnliftIO m => MVar Backend -> ByteString -> m ()
 rawSend _ "" = return ()
 rawSend backend chunk =
-    withMVar backend $ \case
-        ConnectionSocket sock -> liftIO $ Socket.sendAll sock chunk
-        ConnectionTLS ctx     -> liftIO $ TLS.sendData ctx $ LB.fromStrict chunk
+    liftIO $ withMVar backend $ \case
+        ConnectionSocket sock -> Socket.sendAll sock chunk
+        ConnectionTLS ctx     -> TLS.sendData ctx $ LB.fromStrict chunk
 
-getAddr :: MonadIO m => HostName -> ServiceName -> m Socket.SockAddr
-getAddr host port = liftIO $ Socket.addrAddress . head <$> Socket.getAddrInfo (Just hints) (Just host) (Just port)
+rawClose :: MonadUnliftIO m => MVar Backend -> m ()
+rawClose backend =
+    liftIO $ withMVar backend $ \case
+        ConnectionSocket sock -> Socket.close sock
+        ConnectionTLS ctx     -> TLS.bye ctx >> TLS.contextClose ctx
 
-getSocket :: MonadIO m => m Socket
-getSocket = liftIO $ Socket.socket (Socket.addrFamily hints) (Socket.addrSocketType hints) (Socket.addrProtocol hints)
-
-hints :: Socket.AddrInfo
-hints = Socket.defaultHints
-    { Socket.addrFamily     = Socket.AF_INET
-    , Socket.addrSocketType = Socket.Stream
-    }
+dialTimeout :: MonadUnliftIO m => m a -> m a
+dialTimeout f = timeout 3000000 f >>= maybe (throwIO ConnectionTimeout) return
 
 -- | Open a new connection
-connect :: MonadUnliftIO m => (HostName, ServiceName) -> (HostName, ServiceName) -> m Connection
-connect (socketHost, socketPort) (peerHost, peerPort) = do
-    sock <- getSocket
-    socketAddr <- getAddr socketHost socketPort
-    liftIO $ Socket.bind sock socketAddr
-    peerAddr <- getAddr peerHost peerPort
-    liftIO $ Socket.connect sock peerAddr
-    Connection <$> newMVar (ConnectionSocket sock)
-               <*> newMVar ""
-               <*> newMVar ""
-               <*> return socketAddr
-               <*> return (Just peerAddr)
+connect :: (HostName, ServiceName) -> (HostName, ServiceName) -> IO Connection
+connect (lhost, lport) (rhost, rport) =
+    dialTimeout $ do
+        laddr:_ <- Socket.getAddrInfo (Just hints) (Just lhost) (Just lport)
+        raddr:_ <- Socket.getAddrInfo (Just hints) (Just rhost) (Just rport)
+        sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
+        Socket.setSocketOption sock Socket.KeepAlive 1
+        Socket.setSocketOption sock Socket.NoDelay 1
+        Socket.bind sock $ Socket.addrAddress laddr
+        Socket.connect sock $ Socket.addrAddress raddr
+        fromSocket sock
+  where
+    hints = Socket.defaultHints { Socket.addrFamily     = Socket.AF_INET
+                                , Socket.addrSocketType = Socket.Stream
+                                }
 
--- | Listen on a new connection
-listen :: MonadUnliftIO m => (HostName, ServiceName) -> m Connection
-listen (socketHost, socketPort) = do
-    sock <- getSocket
-    socketAddr <- getAddr socketHost socketPort
-    liftIO $ Socket.setSocketOption sock Socket.ReuseAddr 1
-    liftIO $ Socket.bind sock socketAddr
-    liftIO $ Socket.listen sock 1
-    Connection <$> newMVar (ConnectionSocket sock)
-               <*> newMVar ""
-               <*> newMVar ""
-               <*> return socketAddr
-               <*> return Nothing
+-- | Listen on a new socket
+listen :: (HostName, ServiceName) -> IO Connection
+listen (lhost, lport) =
+    dialTimeout $ do
+        laddr:_ <- Socket.getAddrInfo (Just hints) (Just lhost) (Just lport)
+        sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
+        Socket.setSocketOption sock Socket.KeepAlive 1
+        Socket.setSocketOption sock Socket.NoDelay 1
+        Socket.setSocketOption sock Socket.ReuseAddr 1
+        Socket.bind sock $ Socket.addrAddress laddr
+        Socket.listen sock 1
+        fromSocket sock
+  where
+    hints = Socket.defaultHints { Socket.addrFamily     = Socket.AF_INET
+                                , Socket.addrSocketType = Socket.Stream
+                                }
 
 -- | Accept a connection
-accept :: MonadUnliftIO m => Connection -> m Connection
+accept :: Connection -> IO (Connection, SockAddr)
 accept Connection{..} =
     withMVar connBackend $ \case
         ConnectionSocket sock -> do
-            (sock', peerAddr) <- liftIO $ Socket.accept sock
-            Connection <$> newMVar (ConnectionSocket sock')
-                       <*> newMVar ""
-                       <*> newMVar ""
-                       <*> return connSocketAddr
-                       <*> return (Just peerAddr)
-        _ -> throwIO $ OperationRefused "accept requires a socket backend"
+            (sock', addr') <- Socket.accept sock
+            conn' <- fromSocket sock'
+            return (conn', addr')
+        _ ->
+            fail "accept requires a socket backend"
+
+-- | Close a connection
+close :: MonadUnliftIO m => Connection -> m ()
+close Connection{..} = rawClose connBackend
 
 resolvSeed :: DNS.ResolvSeed
 resolvSeed = unsafePerformIO $ DNS.makeResolvSeed DNS.defaultResolvConf
 {-# NOINLINE resolvSeed #-}
 
-lookupMX :: MonadIO m => HostName -> m [(HostName, Int)]
+lookupMX :: HostName -> IO [(HostName, Int)]
 lookupMX domain =
-    liftIO $ DNS.withResolver resolvSeed $ \resolver ->
+    DNS.withResolver resolvSeed $ \resolver ->
         DNS.lookupMX resolver (DNS.normalize $ C.pack domain) >>= \case
             Left e           -> throwIO e
             Right [(".", _)] -> throwIO NullMX
             Right []         -> return [(domain, 0)] -- implicit MX
             Right rs         -> return $ map (first C.unpack) rs
 
-sortMX :: MonadRandom m => [(HostName, Int)] -> m [(HostName, Int)]
-sortMX = fmap concat . mapM shuffleM . groupBy (\(_, p1) (_, p2) -> p1 == p2) . sortOn snd
-
-tryEach :: MonadUnliftIO m => [m a] -> m a
-tryEach []     = throwIO $ OperationRefused "tryEach requires a non-empty list"
-tryEach [a]    = a
-tryEach (a:as) = a `catchAny` \_ -> tryEach as
+sortMX :: [(HostName, Int)] -> IO [(HostName, Int)]
+sortMX = fmap concat . mapM shuffleM . groupOn snd . sortOn snd
+  where
+    groupOn :: Ord b => (a -> b) -> [a] -> [[a]]
+    groupOn f = groupBy (\a1 a2 -> f a1 == f a2)
 
 -- | Open a new connection to a MX domain
-connectMX :: (MonadUnliftIO m, MonadRandom m) => (HostName, ServiceName) -> HostName -> m Connection
-connectMX src domain = do
-    hosts <- map fst <$> (lookupMX domain >>= sortMX)
-    tryEach $ flip map hosts $ \host ->
-        tryEach $ flip map ["465", "587", "25", "2525"] $ \port -> do
-            conn <- connect src (host, port)
-            when (port == "465") $ secure conn $ tlsClientParams host True
+connectMX :: HostName -> HostName -> IO Connection
+connectMX lhost domain = do
+    rhosts <- map fst <$> (lookupMX domain >>= sortMX)
+    asum $ flip map rhosts $ \rhost ->
+        asum $ flip map ["465", "587", "25", "2525"] $ \rport -> do
+            conn <- connect (lhost, "0") (rhost, rport)
+            when (rport == "465") $ secure conn $ tlsClientParams rhost True
             return conn
 
 -- | Upgrade a plain socket to a TLS connection
@@ -239,56 +250,75 @@ tlsServerParams cred =
             }
         }
 
--- | Close a connection
-close :: MonadUnliftIO m => Connection -> m ()
-close Connection{..} =
-    withMVar connBackend $ \case
-        ConnectionSocket sock -> liftIO $ Socket.close sock
-        ConnectionTLS ctx     -> liftIO $ TLS.bye ctx >> TLS.contextClose ctx
+-- | Send a bytestring over a connection
+send :: MonadUnliftIO m => Connection -> LB.ByteString -> m ()
+send Connection{..} = mapM_ (rawSend connBackend) . LB.toChunks
 
--- | Send bytestring over a connection
-send :: MonadUnliftIO m => Connection -> ByteString -> m ()
-send Connection{..} chunk =
-    modifyMVar_ connSendBuffer $ \buffer -> do
-        rawSend connBackend $ buffer `B.append` chunk
-        return ""
+-- | Send a single line appending the newline
+sendLine :: MonadUnliftIO m => Connection -> ByteString -> m ()
+sendLine conn = send conn . LB.fromStrict . (`C.snoc` '\n')
 
--- | Put a bytestring into the send buffer
-put :: MonadUnliftIO m => Connection -> ByteString -> m ()
-put Connection{..} chunk =
-    modifyMVar_ connSendBuffer $ \buffer ->
-        return $ buffer `B.append` chunk
+-- | Send a set of lines
+sendLines :: MonadUnliftIO m => Connection -> [ByteString] -> m ()
+sendLines conn = send conn . LB.fromStrict . C.unlines
 
--- | Flush the send buffer
-flush :: MonadUnliftIO m => Connection -> m ()
-flush Connection{..} =
-    modifyMVar_ connSendBuffer $ \buffer -> do
-        rawSend connBackend buffer
-        return ""
-
--- | Receive bytestring over a connection
-recv :: MonadUnliftIO m => Connection -> m ByteString
-recv conn = recv' conn $ return . ("", )
-
--- | Receive bytestring over a connection and put the unused portion back on the buffer
-recv' :: MonadUnliftIO m => Connection -> (ByteString -> m (ByteString, a)) -> m a
-recv' Connection{..} f =
+-- | Receive a bytestring over a connection and put the unused portion back on the buffer
+recv :: MonadUnliftIO m => Connection -> (ByteString -> m (ByteString, a)) -> m a
+recv Connection{..} f =
     modifyMVar connRecvBuffer $ \buffer ->
-        if not $ B.null buffer then f buffer else do
-            chunk <- rawRecv connBackend
-            when (B.null chunk) $ throwIO PeerConnectionClosed
-            f chunk
+        if B.null buffer then rawRecv connBackend >>= f else f buffer
 
--- | Look ahead without consuming the recv buffer or blocking forever
-lookAhead :: MonadUnliftIO m => Connection -> m ByteString
-lookAhead Connection{..} =
-    modifyMVar connRecvBuffer $ \buffer ->
-        if not $ B.null buffer then return (buffer, buffer) else do
-            chunk <- fromMaybe "" <$> timeout 50 (rawRecv connBackend)
-            return (chunk, chunk)
+-- | Receive the next line minus the newline
+recvLine :: (MonadUnliftIO m, MonadFail m) => Connection -> m ByteString
+recvLine conn = recvLoop ""
+  where
+    recvLoop acc = join $ recv conn $ \chunk ->
+        let (acc', chunk') = first (acc <>) $ C.break (== '\n') chunk in
+        if chunk' == ""
+            then return ("", recvLoop acc')
+            else return (B.drop 1 chunk', return acc')
+
+-- | Receive the next set of full lines
+recvLines :: (MonadUnliftIO m, MonadFail m) => Connection -> m [ByteString]
+recvLines conn = C.lines <$> recvLoop ""
+  where
+    recvLoop acc = join $ recv conn $ \chunk ->
+        let acc' = acc <> chunk in
+        if C.last chunk == '\n'
+            then return ("", return acc')
+            else return ("", recvLoop acc')
+
+-- | Receive a message minus the data termination sequence
+recvData :: (MonadUnliftIO m, MonadFail m) => Connection -> m LB.ByteString
+recvData conn = BB.toLazyByteString . mconcat . map (\l -> BB.byteString l <> "\n") <$> unfoldWhileM (\l -> l /= "." && l /= ".\r") (recvLine conn)
+
+-- | Receive a tuple of a bytestring and a parsed object it corresponds to
+recvParsed :: (MonadUnliftIO m, MonadFail m) => Connection -> AP.Parser a -> m (ByteString, a)
+recvParsed conn parser = recvLoop "" $ AP.parse parser
+  where
+    recvLoop acc parser = do
+        join $ recv conn $ \chunk ->
+            case parser chunk of
+                AP.Fail i [] err   -> return (i, fail $ "recv: " ++ err)
+                AP.Fail i ctxs err -> return (i, fail $ "recv: " ++ intercalate " > " ctxs ++ ": " ++ err)
+                AP.Done i a        -> return (i, return (acc <> B.take (B.length chunk - B.length i) chunk, a))
+                AP.Partial parser' -> return ("", recvLoop (acc <> chunk) parser')
+
+type Reply = (Int, [Text])
+
+-- | Receive a tuple of a bytestring and matching reply
+recvReply :: (MonadUnliftIO m, MonadFail m) => Connection -> m (ByteString, Reply)
+recvReply conn = recvParsed conn pReply
+  where
+    pReply =
+        liftA2 (,) (AP.lookAhead AP.decimal) $
+            liftA2 snoc (many $ AP.take 3 *> AP.string "-" *> pLine)
+                        (AP.take 3 *> AP.string " " *> pLine)
+    pLine = T.decodeUtf8 <$> AP.takeTill (== 10) <* AP.take 1
+    snoc as a = as ++ [a]
 
 -- | Extra connection exceptions in addition to those thrown by Socket/TLS/DNS/etc libraries
-data ConnectionException = OperationRefused String
+data ConnectionException = ConnectionTimeout
                          | PeerConnectionClosed
                          | NullMX
   deriving (Show, Eq)

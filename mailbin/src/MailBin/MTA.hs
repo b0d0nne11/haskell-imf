@@ -16,15 +16,15 @@ import           Control.Monad.Loops         (untilM_)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString.Lazy        as LB
 import           Data.IMF                    (Mailbox)
-import           Data.IMF.Network            (PassFail (..), Server (..), runServer)
+import           Data.IMF.Network            (PassFail (..), Server (..), newServer, runServer)
+import           Data.IMF.Network.Connection (Connection, HostName, ServiceName, Socket, SockAddr)
 import qualified Data.IMF.Network.Connection as Connection
+import           Data.Int                    (Int64)
 import           Data.Maybe                  (isNothing)
 import           Data.Pool                   (Pool)
 import           Data.Text                   (Text)
 import qualified Database.SQLite.Simple      as DB
 import           GHC.IO.Exception            (IOException)
-import           Network.Simple.TCP          (HostPreference, ServiceName, SockAddr, Socket, accept,
-                                              bindSock, closeSock, listenSock)
 import qualified Network.TLS                 as TLS
 import           System.Log.FastLogger       (FastLogger, toLogStr)
 
@@ -32,13 +32,13 @@ import           MailBin.Config
 import           MailBin.DB
 
 data ConfigParams = ConfigParams
-    { configHost           :: HostPreference
+    { configHost           :: HostName
     , configPort           :: ServiceName
     , configCertificate    :: String
     , configPrivateKey     :: String
     , configCredentials    :: [(Text, Text)]
     , configMaxRecipients  :: Int
-    , configMaxMessageSize :: Int
+    , configMaxMessageSize :: Int64
     , configRequireTLS     :: Bool
     , configRequireAuth    :: Bool
     }
@@ -58,18 +58,18 @@ loadConfigParams config =
 auth :: [(Text, Text)] -> Text -> Text -> IO PassFail
 auth creds user' pass' = return $ if (user', pass') `elem` creds then Pass else PermFail
 
-acceptMessage :: Pool DB.Connection -> Maybe Mailbox -> [Mailbox] -> ByteString -> IO PassFail
-acceptMessage dbPool rp rcpts msg = Pass <$ insertMessage dbPool rp rcpts (LB.fromStrict msg)
+acceptMessage :: Pool DB.Connection -> Maybe Mailbox -> [Mailbox] -> LB.ByteString -> IO PassFail
+acceptMessage dbPool rp rcpts msg = Pass <$ insertMessage dbPool rp rcpts msg
 
-acceptSockLoop :: MVar [Async ()] -> Socket -> ((Socket, SockAddr) -> IO ()) -> IO ()
-acceptSockLoop ts sock = handle (\(_ :: IOException) -> return ()) . forever . acceptSockFork ts sock
+acceptSockLoop :: MVar [Async ()] -> Connection -> ((Connection, SockAddr) -> IO ()) -> IO ()
+acceptSockLoop ts conn = handle (\(_ :: IOException) -> return ()) . forever . acceptSockFork ts conn
 
-acceptSockFork :: MVar [Async ()] -> Socket -> ((Socket, SockAddr) -> IO ()) -> IO ()
-acceptSockFork ts sock f =
-    accept sock $ \a ->
-        modifyMVar_ ts $ \ts' -> do
-            t <- async $ f a
-            return (t:ts')
+acceptSockFork :: MVar [Async ()] -> Connection -> ((Connection, SockAddr) -> IO ()) -> IO ()
+acceptSockFork ts conn f = do
+    (conn', addr') <- Connection.accept conn
+    modifyMVar_ ts $ \ts' -> do
+        t <- async $ f (conn', addr')
+        return (t:ts')
 
 pollAll :: MVar [Async ()] -> IO ()
 pollAll ts = modifyMVar_ ts $ filterM (fmap isNothing . poll)
@@ -81,9 +81,8 @@ runMTA :: Config -> FastLogger -> Pool DB.Connection -> IO (IO ())
 runMTA config logger dbPool = do
     ConfigParams{..} <- loadConfigParams config
     cert <- either error id <$> TLS.credentialLoadX509 configCertificate configPrivateKey
-    (sock, addr) <- bindSock configHost configPort
-    listenSock sock 2048
-    logger $ "starting mta @ smtp://" <> toLogStr (show addr) <> "\n"
+    logger $ "starting mta @ smtp://" <> toLogStr configHost <> ":" <> toLogStr configPort <> "\n"
+    conn <- Connection.listen (configHost, configPort)
     ts <- newMVar []
     done <- newEmptyMVar
     forkIO $
@@ -91,14 +90,12 @@ runMTA config logger dbPool = do
             threadDelay 250000
             pollAll ts
     forkIO $ do
-        acceptSockLoop ts sock $ \(sock', addr') -> do
+        acceptSockLoop ts conn $ \(conn', addr') -> do
             tid <- myThreadId
             let tlogger = logger . (<>) ("(" <> toLogStr (show tid) <> ") ")
             tlogger $ "accepted smtp connection from " <> toLogStr (show addr') <> "\n"
-            conn <- Connection.fromSocket sock'
-            runServer $ Server { serverName = "mailbin"
-                               , serverConnection = conn
-                               , serverTLSParams = Connection.tlsServerParams cert
+            server <- newServer "mailbin" conn'
+            runServer $ server { serverTLSParams = Connection.tlsServerParams cert
                                , serverLogger = tlogger
                                , serverAuthenticate = auth configCredentials
                                , serverVerifyReturnPath = const $ return Pass
@@ -113,5 +110,5 @@ runMTA config logger dbPool = do
         logger "stopped mta\n"
         putMVar done ()
     return $ do
-        closeSock sock
+        Connection.close conn
         takeMVar done

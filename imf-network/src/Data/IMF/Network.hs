@@ -2,12 +2,14 @@ module Data.IMF.Network
   ( -- * Client operations
     Client(..)
   , ClientSession(..)
+  , newClient
   , setup
   , deliver
   , quit
     -- * Server operations
   , Server(..)
   , PassFail(..)
+  , newServer
   , runServer
     -- * Connections
   , connect
@@ -20,7 +22,6 @@ module Data.IMF.Network
     -- * Errors
   , Timeout
   , ReplyException(..)
-  , ParseException(..)
   )
 where
 
