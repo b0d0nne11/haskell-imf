@@ -6,4 +6,4 @@ This project is a collection of packages related to email.
 
 Feel free to open an issue or pull request on GitHub.
 
-Copyright (c) 2017-2020, Brendan O'Donnell
+Copyright (c) 2017-2021, Brendan O'Donnell
