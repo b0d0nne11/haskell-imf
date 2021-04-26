@@ -23,19 +23,20 @@ library
                      , async
                      , bytestring
                      , configurator
-                     , fast-logger
                      , http-media
                      , http-types
                      , imf
                      , imf-network
                      , imf-parsers
                      , mtl
-                     , monad-loops
+                     , monad-logger
                      , network-bsd
                      , network-simple
                      , resource-pool
+                     , safe-exceptions
                      , servant-server
                      , sqlite-simple
+                     , stm
                      , text
                      , time
                      , tls
@@ -51,7 +52,7 @@ executable mailbin
   build-depends:       base >= 4.13 && < 5
                      , mailbin
                      , configurator
-                     , fast-logger
+                     , monad-logger
                      , unix
   ghc-options:         -threaded -rtsopts
   default-language:    Haskell2010

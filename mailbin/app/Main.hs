@@ -1,10 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell   #-}
 
 module Main where
 
-import Control.Concurrent    (newEmptyMVar, putMVar, takeMVar)
-import System.Log.FastLogger (LogType' (..), withFastLogger)
-import System.Posix.Signals  (Handler (..), Signal, installHandler, sigINT)
+import Control.Concurrent     (newEmptyMVar, putMVar, takeMVar)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Logger   (logInfo, runStdoutLoggingT)
+import System.Posix.Signals   (Handler (..), Signal, installHandler, sigINT)
 
 import MailBin.API
 import MailBin.Config
@@ -12,18 +14,18 @@ import MailBin.DB
 import MailBin.MTA
 
 main :: IO ()
-main =  withFastLogger (LogStdout 4096) $ \logger -> do
-    config <- loadConfig
+main =  runStdoutLoggingT $ do
+    config <- liftIO loadConfig
     dbPool <- setupDB $ subconfig "db" config
-    closeMTA <- runMTA (subconfig "mta" config) logger dbPool
-    closeAPI <- runAPI (subconfig "api" config) logger dbPool
-    logger "ready\n"
-    waitFor sigINT
-    logger "caught interrupt signal, shutting down\n"
+    closeMTA <- runMTA (subconfig "mta" config) dbPool
+    closeAPI <- runAPI (subconfig "api" config) dbPool
+    $(logInfo) "ready"
+    liftIO $ waitFor sigINT
+    $(logInfo) "caught interrupt signal, shutting down"
     closeAPI
     closeMTA
     closeDB dbPool
-    logger "done\n"
+    $(logInfo) "done"
 
 waitFor :: Signal -> IO ()
 waitFor sig = do

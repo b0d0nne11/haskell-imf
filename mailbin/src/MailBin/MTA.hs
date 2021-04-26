@@ -1,32 +1,32 @@
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE TemplateHaskell   #-}
 
 module MailBin.MTA
   ( runMTA
   )
 where
 
-import           Control.Concurrent          (MVar, forkIO, modifyMVar_, myThreadId, newEmptyMVar,
-                                              newMVar, putMVar, readMVar, takeMVar, threadDelay)
-import           Control.Concurrent.Async    (Async, async, poll)
-import           Control.Exception           (handle)
-import           Control.Monad               (filterM, forever)
-import           Control.Monad.Loops         (untilM_)
-import           Data.ByteString             (ByteString)
+import           Control.Concurrent          (forkIO)
+import           Control.Concurrent.Async    (async, cancel)
+import           Control.Concurrent.STM      (TVar, atomically, check, modifyTVar', newTVarIO,
+                                              readTVar)
+import           Control.Exception.Safe      (bracket_, onException, throwString)
+import           Control.Monad               (forever)
+import           Control.Monad.IO.Class      (liftIO, MonadIO)
+import           Control.Monad.Logger        (logInfo, runStdoutLoggingT, MonadLogger)
+import           Control.Monad.Reader        (runReaderT)
 import qualified Data.ByteString.Lazy        as LB
 import           Data.IMF                    (Mailbox)
-import           Data.IMF.Network            (PassFail (..), Server (..), newServer, runServer)
-import           Data.IMF.Network.Connection (Connection, HostName, ServiceName, Socket, SockAddr)
-import qualified Data.IMF.Network.Connection as Connection
+import           Data.IMF.Network            (PassFail (..), Server (..), newServer, run)
+import           Data.IMF.Network.Connection (Connection, HostName, ServiceName, SockAddr)
+import qualified Data.IMF.Network.Connection as Conn
 import           Data.Int                    (Int64)
-import           Data.Maybe                  (isNothing)
 import           Data.Pool                   (Pool)
 import           Data.Text                   (Text)
+import qualified Data.Text                   as T
 import qualified Database.SQLite.Simple      as DB
-import           GHC.IO.Exception            (IOException)
 import qualified Network.TLS                 as TLS
-import           System.Log.FastLogger       (FastLogger, toLogStr)
 
 import           MailBin.Config
 import           MailBin.DB
@@ -34,8 +34,7 @@ import           MailBin.DB
 data ConfigParams = ConfigParams
     { configHost           :: HostName
     , configPort           :: ServiceName
-    , configCertificate    :: String
-    , configPrivateKey     :: String
+    , configCertificate    :: TLS.Credential
     , configCredentials    :: [(Text, Text)]
     , configMaxRecipients  :: Int
     , configMaxMessageSize :: Int64
@@ -44,71 +43,70 @@ data ConfigParams = ConfigParams
     }
 
 loadConfigParams :: Config -> IO ConfigParams
-loadConfigParams config =
+loadConfigParams config = do
+    certPath <- lookupDefault "localhost.crt" config "certificate"
+    pkeyPath <- lookupDefault "localhost.key" config "private_key"
     ConfigParams <$> lookupDefault "127.0.0.1" config "host"
                  <*> lookupDefault "2525" config "port"
-                 <*> lookupDefault "localhost.crt" config "certificate"
-                 <*> lookupDefault "localhost.key" config "private_key"
+                 <*> loadCertificate certPath pkeyPath
                  <*> lookupDefault [] config "credentials"
                  <*> lookupDefault 10 config "max_recipients"
                  <*> lookupDefault 4096 config "max_message_size"
                  <*> lookupDefault False config "require_tls"
                  <*> lookupDefault False config "require_auth"
 
+loadCertificate :: FilePath -> FilePath -> IO TLS.Credential
+loadCertificate cert pkey = TLS.credentialLoadX509 cert pkey >>= either throwString return
+
+newServer' :: Text -> Connection -> Pool DB.Connection -> ConfigParams -> IO Server
+newServer' name conn dbPool ConfigParams{..} = do
+    server <- liftIO $ newServer name conn
+    return $ server
+        { serverTLSParams = Conn.tlsServerParams configCertificate
+        , serverAuthenticate = auth configCredentials
+        , serverVerifyReturnPath = const $ return Pass
+        , serverVerifyRecipient = const $ return Pass
+        , serverAcceptMessage = acceptMessage dbPool
+        , serverMaxRecipients = configMaxRecipients
+        , serverMaxMessageSize = configMaxMessageSize
+        , serverReqTLS = configRequireTLS
+        , serverReqAuth = configRequireAuth
+        }
+
 auth :: [(Text, Text)] -> Text -> Text -> IO PassFail
-auth creds user' pass' = return $ if (user', pass') `elem` creds then Pass else PermFail
+auth creds user pass = return $ if (user, pass) `elem` creds then Pass else PermFail
 
 acceptMessage :: Pool DB.Connection -> Maybe Mailbox -> [Mailbox] -> LB.ByteString -> IO PassFail
 acceptMessage dbPool rp rcpts msg = Pass <$ insertMessage dbPool rp rcpts msg
 
-acceptSockLoop :: MVar [Async ()] -> Connection -> ((Connection, SockAddr) -> IO ()) -> IO ()
-acceptSockLoop ts conn = handle (\(_ :: IOException) -> return ()) . forever . acceptSockFork ts conn
-
-acceptSockFork :: MVar [Async ()] -> Connection -> ((Connection, SockAddr) -> IO ()) -> IO ()
-acceptSockFork ts conn f = do
-    (conn', addr') <- Connection.accept conn
-    modifyMVar_ ts $ \ts' -> do
-        t <- async $ f (conn', addr')
-        return (t:ts')
-
-pollAll :: MVar [Async ()] -> IO ()
-pollAll ts = modifyMVar_ ts $ filterM (fmap isNothing . poll)
-
-waitAll :: MVar [Async ()] -> IO ()
-waitAll ts = threadDelay 250000 `untilM_` null <$> readMVar ts
-
-runMTA :: Config -> FastLogger -> Pool DB.Connection -> IO (IO ())
-runMTA config logger dbPool = do
-    ConfigParams{..} <- loadConfigParams config
-    cert <- either error id <$> TLS.credentialLoadX509 configCertificate configPrivateKey
-    logger $ "starting mta @ smtp://" <> toLogStr configHost <> ":" <> toLogStr configPort <> "\n"
-    conn <- Connection.listen (configHost, configPort)
-    ts <- newMVar []
-    done <- newEmptyMVar
-    forkIO $
-        forever $ do
-            threadDelay 250000
-            pollAll ts
-    forkIO $ do
-        acceptSockLoop ts conn $ \(conn', addr') -> do
-            tid <- myThreadId
-            let tlogger = logger . (<>) ("(" <> toLogStr (show tid) <> ") ")
-            tlogger $ "accepted smtp connection from " <> toLogStr (show addr') <> "\n"
-            server <- newServer "mailbin" conn'
-            runServer $ server { serverTLSParams = Connection.tlsServerParams cert
-                               , serverLogger = tlogger
-                               , serverAuthenticate = auth configCredentials
-                               , serverVerifyReturnPath = const $ return Pass
-                               , serverVerifyRecipient = const $ return Pass
-                               , serverAcceptMessage = acceptMessage dbPool
-                               , serverMaxRecipients = configMaxRecipients
-                               , serverMaxMessageSize = configMaxMessageSize
-                               , serverReqTLS = configRequireTLS
-                               , serverReqAuth = configRequireAuth
-                               }
-        waitAll ts
-        logger "stopped mta\n"
-        putMVar done ()
+runMTA :: (MonadIO m, MonadLogger m) => Config -> Pool DB.Connection -> m (m ())
+runMTA config dbPool = do
+    config@ConfigParams{..} <- liftIO $ loadConfigParams config
+    $(logInfo) $ "starting mta @ smtp://" <> T.pack configHost <> ":" <> T.pack configPort
+    t <- liftIO $ async $
+        serve (configHost, configPort) $ \(conn', _) ->
+            newServer' "mailbin" conn' dbPool config >>= runStdoutLoggingT . runReaderT run
     return $ do
-        Connection.close conn
-        takeMVar done
+        liftIO $ cancel t
+        $(logInfo) "stopped mta"
+
+serve :: (HostName, ServiceName) -> ((Connection, SockAddr) -> IO ()) -> IO ()
+serve (host, port) f = do
+    conn <- Conn.listen (host, port)
+    numThreads <- newCounter
+    onException (forever $ Conn.accept conn >>= forkIO . bracket_ (inc numThreads) (dec numThreads) . f)
+                (Conn.close conn >> waitForZero numThreads)
+
+newtype Counter = Counter (TVar Int)
+
+newCounter :: IO Counter
+newCounter = Counter <$> newTVarIO 0
+
+waitForZero :: Counter -> IO ()
+waitForZero (Counter ref) = atomically $ readTVar ref >>= check . (== 0)
+
+inc :: Counter -> IO ()
+inc (Counter ref) = atomically $ modifyTVar' ref (+ 1)
+
+dec :: Counter -> IO ()
+dec (Counter ref) = atomically $ modifyTVar' ref (subtract 1)

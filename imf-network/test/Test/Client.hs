@@ -5,20 +5,22 @@
 
 module Test.Client where
 
-import           Control.Concurrent          (forkIO)
-import           Control.Monad.Reader        (runReaderT)
-import           Data.ByteString             (ByteString)
-import qualified Data.ByteString             as B
-import qualified Data.ByteString.Lazy        as LB
-import           Data.Text                   (Text)
-import qualified Network.TLS                 as TLS
-import           System.IO.Unsafe            (unsafePerformIO)
-import           System.Log.FastLogger
+import           Control.Concurrent           (forkIO)
+import           Control.Concurrent.MVar      (newEmptyMVar, putMVar, takeMVar)
+import           Control.Concurrent.STM.TChan (TChan, isEmptyTChan, newTChanIO, readTChan,
+                                               writeTChan)
+import           Control.Exception.Safe       (bracket)
+import           Control.Monad.IO.Class       (MonadIO)
+import           Control.Monad.Logger         (LogLine, LoggingT, runLoggingT)
+import           Control.Monad.Loops          (untilM)
+import           Control.Monad.Reader         (runReaderT)
+import           Control.Monad.STM            (atomically)
+import qualified Data.ByteString.Lazy         as LB
+import           Data.Text                    (Text)
+import qualified Network.TLS                  as TLS
+import           System.IO.Unsafe             (unsafePerformIO)
 import           Test.Tasty
 import           Test.Tasty.HUnit
-import           UnliftIO.Exception          (bracket, throwString)
-import           UnliftIO.IORef              (atomicModifyIORef', newIORef, readIORef)
-import           UnliftIO.MVar               (newEmptyMVar, putMVar, takeMVar)
 
 import           Data.IMF
 import           Data.IMF.Network.Client
@@ -43,7 +45,7 @@ clientTest clientAct serverAct = do
   where
     server sync = bracket (listen ("127.0.0.1", "2525")) close $ \conn -> do
         putMVar sync ()
-        bracket (accept conn) close serverAct
+        bracket (fst <$> accept conn) close serverAct
     client sync = do
         takeMVar sync
         connect ("0.0.0.0", "0") ("127.0.0.1", "2525") >>= newClient' "relay.example.com" >>= clientAct
@@ -60,21 +62,18 @@ testMessage = unsafePerformIO $ LB.readFile "./test/Fixtures/Messages/simple_add
 {-# NOINLINE testMessage #-}
 
 testCertificate :: TLS.Credential
-testCertificate = unsafePerformIO $ TLS.credentialLoadX509 "./test/Fixtures/localhost.crt" "./test/Fixtures/localhost.key" >>= either throwString return
+testCertificate = unsafePerformIO $ TLS.credentialLoadX509 "./test/Fixtures/localhost.crt" "./test/Fixtures/localhost.key" >>= either fail return
 {-# NOINLINE testCertificate #-}
 
-newMemLogger :: IO (LogStr -> IO (), IO ByteString)
-newMemLogger = do
-    ref <- newIORef mempty
-    return (logger ref, reader ref)
-  where
-    logger ref new = atomicModifyIORef' ref $ \old -> (old <> new, ())
-    reader ref = fromLogStr <$> readIORef ref
+runTChanLoggingT :: MonadIO m => TChan LogLine -> LoggingT m a -> m a
+runTChanLoggingT chan = (`runLoggingT` \loc src lvl msg -> atomically $ writeTChan chan (loc, src, lvl, msg))
 
-withMemLogger :: ((LogStr -> IO ()) -> IO ()) -> IO ByteString
-withMemLogger f = do
-    (logger, reader) <- newMemLogger
-    f logger >> reader
+withLogging :: LoggingT IO a -> IO (a, [LogLine])
+withLogging f = do
+    chan <- newTChanIO
+    a <- runTChanLoggingT chan f
+    logs <- atomically $ readTChan chan `untilM` isEmptyTChan chan
+    return (a, logs)
 
 testHello = testCase "init (ehlo)" $
     clientTest clientAct serverAct
@@ -84,17 +83,16 @@ testHello = testCase "init (ehlo)" $
         recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250-SIZE 14680064\r\n250 HELP\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger -> do
-            ClientSession{..} <- runReaderT setup $ client { clientLogger = logger }
-            sessionExtentions @?= [("size",["14680064"]),("help",[])]
-            isSecure (clientConnection client) >>= (@?= False)
-            sessionUser @?= Nothing
-        log @?= B.concat
-            [ "< 220 smtp.example.com ESMTP Postfix\r\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250-SIZE 14680064\r\n"
-            , "< 250 HELP\r\n"
+        (ClientSession{..}, log) <- withLogging $ runReaderT setup client
+        sessionExtentions @?= [("size",["14680064"]),("help",[])]
+        isSecure (clientConnection client) >>= (@?= False)
+        sessionUser @?= Nothing
+        map (\(_, _, _, a) -> a) log @?=
+            [ "< 220 smtp.example.com ESMTP Postfix\r"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250-SIZE 14680064\r"
+            , "< 250 HELP\r"
             ]
 
 testHelloFallback = testCase "init (helo)" $
@@ -107,17 +105,16 @@ testHelloFallback = testCase "init (helo)" $
         recvLine conn >>= (@?= "HELO relay.example.com\r")
         send conn "250 smtp.example.com, I am glad to meet you\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger -> do
-            ClientSession{..} <- runReaderT setup $ client { clientLogger = logger }
-            sessionExtentions @?= []
-            isSecure (clientConnection client) >>= (@?= False)
-            sessionUser @?= Nothing
-        log @?= B.concat
-            [ "< 220 smtp.example.com ESMTP Postfix\r\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 502 Command not implemented\r\n"
-            , "> HELO relay.example.com\r\n"
-            , "< 250 smtp.example.com, I am glad to meet you\r\n"
+        (ClientSession{..}, log) <- withLogging $ runReaderT setup client
+        sessionExtentions @?= []
+        isSecure (clientConnection client) >>= (@?= False)
+        sessionUser @?= Nothing
+        map (\(_, _, _, a) -> a) log @?=
+            [ "< 220 smtp.example.com ESMTP Postfix\r"
+            , "> EHLO relay.example.com\r"
+            , "< 502 Command not implemented\r"
+            , "> HELO relay.example.com\r"
+            , "< 250 smtp.example.com, I am glad to meet you\r"
             ]
 
 testStartTLS = testCase "init (ehlo + starttls)" $
@@ -133,22 +130,21 @@ testStartTLS = testCase "init (ehlo + starttls)" $
         recvLine conn >>= (@?= "EHLO relay.example.com\r")
         send conn "250-smtp.example.com\r\n250 STARTTLS\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger -> do
-            ClientSession{..} <- runReaderT setup $ client { clientLogger = logger }
-            sessionExtentions @?= [("starttls", [])]
-            isSecure (clientConnection client) >>= (@?= True)
-            sessionUser @?= Nothing
-        log @?= B.concat
-            [ "< 220 smtp.example.com ESMTP Postfix\r\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250 STARTTLS\r\n"
-            , "> STARTTLS\r\n"
-            , "< 220 Go ahead\r\n"
-            , "- [tls handshake]\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250 STARTTLS\r\n"
+        (ClientSession{..}, log) <- withLogging $ runReaderT setup client
+        sessionExtentions @?= [("starttls", [])]
+        isSecure (clientConnection client) >>= (@?= True)
+        sessionUser @?= Nothing
+        map (\(_, _, _, a) -> a) log @?=
+            [ "< 220 smtp.example.com ESMTP Postfix\r"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250 STARTTLS\r"
+            , "> STARTTLS\r"
+            , "< 220 Go ahead\r"
+            , "- [tls handshake]"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250 STARTTLS\r"
             ]
 
 testAuthLogin = testCase "init (ehlo + starttls + login)" $
@@ -170,29 +166,28 @@ testAuthLogin = testCase "init (ehlo + starttls + login)" $
         recvLine conn >>= (@?= "cGFzc3dvcmQ=\r")
         send conn "235 Authentication successful.\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger -> do
-            ClientSession{..} <- runReaderT setup $ client { clientLogger = logger, clientCredentials = Just ("username", "password") }
-            sessionExtentions @?= [("starttls", []), ("auth", ["login"])]
-            isSecure (clientConnection client) >>= (@?= True)
-            sessionUser @?= Just "username"
-        log @?= B.concat
-            [ "< 220 smtp.example.com ESMTP Postfix\r\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250 STARTTLS\r\n"
-            , "> STARTTLS\r\n"
-            , "< 220 Go ahead\r\n"
-            , "- [tls handshake]\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250-STARTTLS\r\n"
-            , "< 250 AUTH LOGIN\r\n"
-            , "> AUTH LOGIN\r\n"
-            , "< 334 VXNlcm5hbWU6\r\n"
-            , "> dXNlcm5hbWU=\r\n"
-            , "< 334 UGFzc3dvcmQ6\r\n"
-            , "> cGFzc3dvcmQ=\r\n"
-            , "< 235 Authentication successful.\r\n"
+        (ClientSession{..}, log) <- withLogging $ runReaderT setup $ client { clientCredentials = Just ("username", "password") }
+        sessionExtentions @?= [("starttls", []), ("auth", ["login"])]
+        isSecure (clientConnection client) >>= (@?= True)
+        sessionUser @?= Just "username"
+        map (\(_, _, _, a) -> a) log @?=
+            [ "< 220 smtp.example.com ESMTP Postfix\r"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250 STARTTLS\r"
+            , "> STARTTLS\r"
+            , "< 220 Go ahead\r"
+            , "- [tls handshake]"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250-STARTTLS\r"
+            , "< 250 AUTH LOGIN\r"
+            , "> AUTH LOGIN\r"
+            , "< 334 VXNlcm5hbWU6\r"
+            , "> dXNlcm5hbWU=\r"
+            , "< 334 UGFzc3dvcmQ6\r"
+            , "> cGFzc3dvcmQ=\r"
+            , "< 235 Authentication successful.\r"
             ]
 
 testAuthPlain = testCase "init (ehlo + starttls + plain)" $
@@ -210,25 +205,24 @@ testAuthPlain = testCase "init (ehlo + starttls + plain)" $
         recvLine conn >>= (@?= "AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r")
         send conn "235 Authentication successful.\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger -> do
-            ClientSession{..} <- runReaderT setup $ client { clientLogger = logger, clientCredentials = Just ("username", "password") }
-            sessionExtentions @?= [("starttls", []), ("auth", ["plain"])]
-            isSecure (clientConnection client) >>= (@?= True)
-            sessionUser @?= Just "username"
-        log @?= B.concat
-            [ "< 220 smtp.example.com ESMTP Postfix\r\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250 STARTTLS\r\n"
-            , "> STARTTLS\r\n"
-            , "< 220 Go ahead\r\n"
-            , "- [tls handshake]\n"
-            , "> EHLO relay.example.com\r\n"
-            , "< 250-smtp.example.com\r\n"
-            , "< 250-STARTTLS\r\n"
-            , "< 250 AUTH PLAIN\r\n"
-            , "> AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r\n"
-            , "< 235 Authentication successful.\r\n"
+        (ClientSession{..}, log) <- withLogging $ runReaderT setup $ client { clientCredentials = Just ("username", "password") }
+        sessionExtentions @?= [("starttls", []), ("auth", ["plain"])]
+        isSecure (clientConnection client) >>= (@?= True)
+        sessionUser @?= Just "username"
+        map (\(_, _, _, a) -> a) log @?=
+            [ "< 220 smtp.example.com ESMTP Postfix\r"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250 STARTTLS\r"
+            , "> STARTTLS\r"
+            , "< 220 Go ahead\r"
+            , "- [tls handshake]"
+            , "> EHLO relay.example.com\r"
+            , "< 250-smtp.example.com\r"
+            , "< 250-STARTTLS\r"
+            , "< 250 AUTH PLAIN\r"
+            , "> AUTH PLAIN dXNlcm5hbWUAdXNlcm5hbWUAcGFzc3dvcmQ=\r"
+            , "< 235 Authentication successful.\r"
             ]
 
 testDeliver = testCase "deliver" $
@@ -244,18 +238,17 @@ testDeliver = testCase "deliver" $
         _ <- recvData conn
         send conn "250 Ok: queued as 12345\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger ->
-            runReaderT (deliver (Mailbox "" "matt" "localhost") [Mailbox "" "mary" "localhost"] testMessage) $ client { clientLogger = logger }
-        log @?= B.concat
-            [ "> MAIL FROM:<matt@localhost>\r\n"
-            , "< 250 Ok\r\n"
-            , "> RCPT TO:<mary@localhost>\r\n"
-            , "< 250 Ok\r\n"
-            , "> DATA\r\n"
-            , "< 354 End data with <CR><LF>.<CR><LF>\r\n"
-            , "> [224 bytes]\n"
-            , "> .\r\n"
-            , "< 250 Ok: queued as 12345\r\n"
+        (_, log) <- withLogging $ runReaderT (deliver (Mailbox "" "matt" "localhost") [Mailbox "" "mary" "localhost"] testMessage) client
+        map (\(_, _, _, a) -> a) log @?=
+            [ "> MAIL FROM:<matt@localhost>\r"
+            , "< 250 Ok\r"
+            , "> RCPT TO:<mary@localhost>\r"
+            , "< 250 Ok\r"
+            , "> DATA\r"
+            , "< 354 End data with <CR><LF>.<CR><LF>\r"
+            , "> [224 bytes]"
+            , "> .\r"
+            , "< 250 Ok: queued as 12345\r"
             ]
 
 testQuit = testCase "quit" $
@@ -265,10 +258,9 @@ testQuit = testCase "quit" $
         recvLine conn >>= (@?= "QUIT\r")
         send conn "221 Bye\r\n"
     clientAct client = do
-        log <- withMemLogger $ \logger ->
-            runReaderT quit $ client { clientLogger = logger }
-        log @?= B.concat
-            [ "> QUIT\r\n"
-            , "< 221 Bye\r\n"
-            , "- [closing connection]\n"
+        (_, log) <- withLogging $ runReaderT quit client
+        map (\(_, _, _, a) -> a) log @?=
+            [ "> QUIT\r"
+            , "< 221 Bye\r"
+            , "- [closing connection]"
             ]

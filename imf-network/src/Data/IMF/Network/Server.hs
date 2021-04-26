@@ -1,26 +1,26 @@
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE FlexibleInstances   #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ConstraintKinds   #-}
+{-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module Data.IMF.Network.Server
   ( Server(..)
   , PassFail(..)
   , newServer
-  , runServer
+  , run
   )
 where
 
+import           Control.Concurrent.MVar     (MVar, modifyMVar_, newMVar, swapMVar)
+import           Control.Exception.Safe      (MonadMask)
 import           Control.Monad               (forM_, join, unless, when)
-import           Control.Monad.IO.Unlift     (liftIO)
-import           Control.Monad.Loops         (iterateUntilM)
-import           Control.Monad.Reader        (ReaderT, ask, asks, runReaderT)
+import           Control.Monad.IO.Class      (MonadIO, liftIO)
+import           Control.Monad.Logger        (MonadLogger, logDebugN)
+import           Control.Monad.Reader        (MonadReader, ask, asks)
 import qualified Data.Attoparsec.Text        as T (IResult (..), parseWith)
-import           Data.ByteString             (ByteString)
-import qualified Data.ByteString             as B
 import qualified Data.ByteString.Lazy        as LB
-import qualified Data.ByteString.Base64      as B64
 import           Data.Default.Class          (def)
 import           Data.Foldable               (foldlM)
 import           Data.Int                    (Int64)
@@ -28,26 +28,25 @@ import           Data.Maybe                  (isJust, isNothing)
 import           Data.Text                   (Text)
 import qualified Data.Text                   as T
 import qualified Data.Text.Encoding          as T
+import qualified Data.Text.Encoding.Base64   as T
+import           Data.Time                   (NominalDiffTime)
 import qualified Network.TLS                 as TLS
-import           System.Log.FastLogger       (LogStr, ToLogStr (..))
-import           UnliftIO.MVar               (MVar, modifyMVar_, swapMVar, newMVar)
 
-import           Data.IMF
-import           Data.IMF.Network.Command
+import           Data.IMF                    (Mailbox, Message, format)
+import           Data.IMF.Network.Command    (Command (..), pCommand)
 import           Data.IMF.Network.Connection (Connection)
-import qualified Data.IMF.Network.Connection as Connection
-import           Data.IMF.Network.Errors
-import           Data.IMF.Parsers.Mailbox
-import           Data.IMF.Parsers.Message
+import qualified Data.IMF.Network.Connection as Conn
+import           Data.IMF.Network.Errors     (cuttoff, handleReply, throwReply)
+import           Data.IMF.Parsers.Mailbox    (pMailbox)
+import           Data.IMF.Parsers.Message    (pMessage)
 
-type ServerM = ReaderT Server IO
+type ServerEnv m = (MonadIO m, MonadLogger m, MonadMask m, MonadReader Server m)
 
 data Server = Server
     { serverName             :: Text
     , serverConnection       :: Connection
     , serverPendingLines     :: MVar [Text]
     , serverTLSParams        :: TLS.ServerParams
-    , serverLogger           :: LogStr -> IO ()
     , serverAuthenticate     :: Text -> Text -> IO PassFail
     , serverVerifyReturnPath :: Mailbox -> IO PassFail
     , serverVerifyRecipient  :: Mailbox -> IO PassFail
@@ -60,9 +59,9 @@ data Server = Server
 
 data PassFail = Pass | TempFail | PermFail
 
-serverExtensions :: Server -> ServerM [Text]
+serverExtensions :: ServerEnv m => Server -> m [Text]
 serverExtensions Server{..} = do
-    secure <- Connection.isSecure serverConnection
+    secure <- liftIO $ Conn.isSecure serverConnection
     if secure then return tlsExtensions
               else return defExtensions
   where
@@ -87,7 +86,6 @@ newServer name conn = do
         , serverConnection       = conn
         , serverPendingLines     = pendingLines
         , serverTLSParams        = def
-        , serverLogger           = \_ -> return ()
         , serverAuthenticate     = \_ _ -> return PermFail
         , serverVerifyReturnPath = \_ -> return Pass
         , serverVerifyRecipient  = \_ -> return Pass
@@ -116,99 +114,97 @@ newSession = ServerSession
     , sessionClose      = False
     }
 
-recvLines :: ServerM [Text]
-recvLines = do
+recvLines :: ServerEnv m => NominalDiffTime -> m [Text]
+recvLines ttl = do
     Server{..} <- ask
-    lines <- map T.decodeUtf8 <$> Connection.recvLines serverConnection
-    forM_ lines $ \line -> logger $ "< " <> line
+    lines <- map T.decodeUtf8 <$> liftIO (cuttoff ttl $ Conn.recvLines serverConnection)
+    forM_ lines $ \line -> logDebugN $ "< " <> line
     return lines
 
-recvCredential :: ServerM Text
-recvCredential = do
+recvCredential :: ServerEnv m => NominalDiffTime -> m Text
+recvCredential ttl = do
     Server{..} <- ask
-    line <- T.decodeUtf8 <$> Connection.recvLine serverConnection
-    logger ("< [...]" :: String)
+    line <- T.decodeUtf8 <$> liftIO (cuttoff ttl $ Conn.recvLine serverConnection)
+    logDebugN "< [...]"
     return line
 
-recvData :: ServerM LB.ByteString
-recvData = do
+recvData :: ServerEnv m => NominalDiffTime -> m LB.ByteString
+recvData ttl = do
     Server{..} <- ask
-    msg <- Connection.recvData serverConnection
-    logger $ "< [" <> show (LB.length msg) <> " bytes]"
+    msg <- liftIO $ cuttoff ttl $ Conn.recvData serverConnection
+    logDebugN $ "< [" <> T.pack (show $ LB.length msg) <> " bytes]"
     return msg
 
-reply :: (Int, [Text]) -> ServerM ()
+reply :: ServerEnv m => (Int, [Text]) -> m ()
 reply r = do
     Server{..} <- ask
-    modifyMVar_ serverPendingLines $ return . (++ formatReply r)
+    liftIO $ modifyMVar_ serverPendingLines $ return . (++ formatReply r)
   where
     formatReply (code, [])   = [T.pack (show code) <> " \r"]
     formatReply (code, [l])  = [T.pack (show code) <> " " <> l <> "\r"]
     formatReply (code, l:ls) = (T.pack (show code) <> "-" <> l <> "\r") : formatReply (code, ls)
 
-sendLines :: ServerM ()
+sendLines :: ServerEnv m => m ()
 sendLines = do
     Server{..} <- ask
-    lines <- swapMVar serverPendingLines []
-    Connection.sendLines serverConnection $ map T.encodeUtf8 lines
-    forM_ lines $ \line -> logger $ "> " <> line
+    lines <- liftIO $ swapMVar serverPendingLines []
+    liftIO $ Conn.sendLines serverConnection $ map T.encodeUtf8 lines
+    forM_ lines $ \line -> logDebugN $ "> " <> line
 
-secure :: ServerM ()
+secure :: ServerEnv m => m ()
 secure = do
     Server{..} <- ask
-    Connection.secure serverConnection serverTLSParams
-    logger ("- [tls handshake]" :: String)
+    liftIO $ Conn.secure serverConnection serverTLSParams
+    logDebugN "- [tls handshake]"
 
-close :: ServerM ()
+close :: ServerEnv m => m ()
 close = do
     Server{..} <- ask
-    Connection.close serverConnection
-    logger ("- [closing connection]" :: String)
+    liftIO $ Conn.close serverConnection
+    logDebugN "- [closing connection]"
 
-logger :: ToLogStr msg => msg -> ServerM ()
-logger msg = asks serverLogger >>= \log -> liftIO $ log $ toLogStr msg <> "\n"
-
-runServer :: Server -> IO ()
-runServer = runReaderT $ opening >>= iterateUntilM sessionClose loop >> close
+run :: ServerEnv m => m ()
+run = opening >>= loop >> close
   where
     opening = do
         Server{..} <- ask
-        reply (220, [serverName <> " Service ready"]) >> sendLines
+        reply (220, [serverName <> " Service ready"])
+        sendLines
         return newSession
     loop session = do
-        lines <- cuttoff 10 recvLines
-        session <- foldlM step session lines
+        lines <- recvLines 10
+        session@ServerSession{..} <- foldlM step session lines
         sendLines
-        return session
+        unless sessionClose $ loop session
     step session line =
         handleReply (\r -> session <$ reply r) $
             parseCommand line >>= runCommand session
 
-parseCommand :: Text -> ServerM (Command, Text)
+parseCommand :: ServerEnv m => Text -> m (Command, Text)
 parseCommand i =
     T.parseWith (return "") pCommand (T.strip i) >>= \case
         T.Done i' r -> return (r, i')
         _           -> throwReply (500, ["Syntax error, command unrecognized"])
 
-parseMailbox :: Text -> ServerM (Mailbox, Text)
+parseMailbox :: ServerEnv m => Text -> m (Mailbox, Text)
 parseMailbox i =
     T.parseWith (return "") pMailbox (T.strip i) >>= \case
         T.Done i' r -> return (r, i')
         _           -> throwReply (550, ["Syntax error, mailbox " <> i <> " unrecognized"])
 
-parseMessage :: Text -> ServerM (Message, Text)
+parseMessage :: ServerEnv m => Text -> m (Message, Text)
 parseMessage i =
     T.parseWith (return "") pMessage (T.strip i) >>= \case
         T.Done i' r -> return (r, i')
         _           -> throwReply (550, ["Syntax error, message unrecognized"])
 
-parseBase64 :: Text -> ServerM Text
+parseBase64 :: ServerEnv m => Text -> m Text
 parseBase64 i =
-    case B64.decode $ T.encodeUtf8 $ T.strip i of
-        Right i' -> return $ T.decodeUtf8 i'
+    case T.decodeBase64 $ T.strip i of
+        Right i' -> return i'
         _        -> throwReply (501, ["Syntax error, credentials unrecognized"])
 
-runCommand :: ServerSession -> (Command, Text) -> ServerM ServerSession
+runCommand :: ServerEnv m => ServerSession -> (Command, Text) -> m ServerSession
 runCommand session (HELO, line) = do
     reply (250, ["OK"])
     return $ session { sessionGreeting = Just $ T.strip line }
@@ -238,7 +234,7 @@ runCommand session@ServerSession{..} (MAIL, line) = do
     Server{..} <- ask
     when (isNothing sessionGreeting || isJust sessionReturnPath) $
         throwReply (503, ["Bad sequence of commands"])
-    Connection.isSecure serverConnection >>= \secure -> when (serverReqTLS && not secure) $
+    liftIO (Conn.isSecure serverConnection) >>= \secure -> when (serverReqTLS && not secure) $
         throwReply (530, ["Must issue a STARTTLS command first"])
     when (serverReqAuth && isNothing sessionUser) $
         throwReply (530, ["Authentication required"])
@@ -276,7 +272,7 @@ runCommand session@ServerSession{..} (DATA, _) = do
     when (null sessionRecipients) $
         throwReply (554, ["No valid recipients"])
     reply (354, ["End data with <CR><LF>.<CR><LF>"]) >> sendLines
-    msg <- cuttoff 600 recvData
+    msg <- recvData 600
     when (LB.length msg > serverMaxMessageSize) $
         throwReply (552, ["Message exceeds fixed maximum message size"])
     _ <- parseMessage $ T.decodeUtf8 $ LB.toStrict msg
@@ -287,7 +283,7 @@ runCommand session@ServerSession{..} (DATA, _) = do
     return $ session { sessionReturnPath = Nothing, sessionRecipients = [] }
 runCommand _ (STARTTLS, _) = do
     Server{..} <- ask
-    Connection.isSecure serverConnection >>= \secure -> when secure $
+    liftIO (Conn.isSecure serverConnection) >>= \secure -> when secure $
         throwReply (502, ["Command not implemented"])
     reply (220, ["Go ahead"]) >> sendLines
     secure
@@ -295,14 +291,14 @@ runCommand _ (STARTTLS, _) = do
 runCommand session (AUTH, line) = case T.words $ T.strip line of
     ["PLAIN"] -> do
         Server{..} <- ask
-        Connection.isSecure serverConnection >>= \secure -> unless secure $
+        liftIO (Conn.isSecure serverConnection) >>= \secure -> unless secure $
             throwReply (502, ["Command not implemented"])
         reply (334, ["Go ahead"]) >> sendLines
-        creds <- recvCredential
+        creds <- recvCredential 10
         runCommand session (AUTH, "PLAIN " <> creds)
     ["PLAIN", creds] -> do
         Server{..} <- ask
-        Connection.isSecure serverConnection >>= \secure -> unless secure $
+        liftIO (Conn.isSecure serverConnection) >>= \secure -> unless secure $
             throwReply (502, ["Command not implemented"])
         creds <- parseBase64 creds
         (user, pass) <- case T.split (== '\0') creds of
@@ -315,18 +311,18 @@ runCommand session (AUTH, line) = case T.words $ T.strip line of
         return $ session { sessionUser = Just user }
     ["LOGIN"] -> do
         Server{..} <- ask
-        Connection.isSecure serverConnection >>= \secure -> unless secure $
+        liftIO (Conn.isSecure serverConnection) >>= \secure -> unless secure $
             throwReply (502, ["Command not implemented"])
         reply (334, ["VXNlcm5hbWU6"]) >> sendLines
-        user <- recvCredential
+        user <- recvCredential 10
         runCommand session (AUTH, "LOGIN " <> user)
     ["LOGIN", user] -> do
         Server{..} <- ask
-        Connection.isSecure serverConnection >>= \secure -> unless secure $
+        liftIO (Conn.isSecure serverConnection) >>= \secure -> unless secure $
             throwReply (502, ["Command not implemented"])
         reply (334, ["UGFzc3dvcmQ6"]) >> sendLines
         user <- parseBase64 user
-        pass <- recvCredential >>= parseBase64
+        pass <- recvCredential 10 >>= parseBase64
         liftIO (serverAuthenticate user pass) >>= \case
             Pass      -> reply      (235, ["Authentication succeeded"])
             TempFail  -> throwReply (454, ["Temporary authentication failure"])

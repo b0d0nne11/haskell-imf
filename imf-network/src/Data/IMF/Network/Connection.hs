@@ -3,7 +3,6 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{-# LANGUAGE TupleSections #-}
 module Data.IMF.Network.Connection
   ( Connection
   , fromSocket
@@ -41,38 +40,37 @@ module Data.IMF.Network.Connection
   )
 where
 
-import qualified Data.Attoparsec.ByteString as AP
+import           Control.Applicative              (liftA2, many)
+import           Control.Concurrent.MVar          (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
+import           Control.Exception.Safe           (Exception, throw)
+import           Control.Monad                    (join, when)
+import           Control.Monad.Loops              (unfoldWhileM)
+import qualified Data.Attoparsec.ByteString       as AP
 import qualified Data.Attoparsec.ByteString.Char8 as AP (decimal)
-import qualified Data.Attoparsec.Combinator as AP
-import           Control.Applicative        (many, liftA2)
-import           Control.Monad.Loops        (unfoldWhileM)
-import           Control.Monad              (join, when)
-import           Control.Monad.IO.Unlift    (MonadIO, MonadUnliftIO, liftIO)
-import           Data.Bifunctor             (first)
-import           Data.ByteString            (ByteString)
-import qualified Data.ByteString            as B
-import qualified Data.ByteString.Builder    as BB
-import qualified Data.ByteString.Char8      as C
-import qualified Data.ByteString.Lazy       as LB
-import           Data.Default.Class         (def)
-import           Data.Foldable              (asum)
-import           Data.List                  (intercalate, groupBy, sortOn)
-import           Data.Text                  (Text)
-import qualified Data.Text.Encoding         as T
-import           Data.X509.CertificateStore (CertificateStore)
-import qualified Network.DNS                as DNS
-import           Network.Socket             (HostName, ServiceName, Socket, SockAddr)
-import qualified Network.Socket             as Socket hiding (recv, sendAll)
-import qualified Network.Socket.ByteString  as Socket (recv, sendAll)
-import qualified Network.TLS                as TLS
-import qualified Network.TLS.Extra.Cipher   as TLS
-import qualified Network.TLS.Extra.FFDHE    as TLS
-import           System.IO.Unsafe           (unsafePerformIO)
-import           System.Random.Shuffle      (shuffleM)
-import           System.X509                (getSystemCertificateStore)
-import           UnliftIO.Exception         (Exception, throwIO)
-import           UnliftIO.MVar              (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
-import           UnliftIO.Timeout           (timeout)
+import qualified Data.Attoparsec.Combinator       as AP
+import           Data.Bifunctor                   (first)
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Builder          as BB
+import qualified Data.ByteString.Char8            as C
+import qualified Data.ByteString.Lazy             as LB
+import           Data.Default.Class               (def)
+import           Data.Foldable                    (asum)
+import           Data.List                        (groupBy, intercalate, sortOn)
+import           Data.Text                        (Text)
+import qualified Data.Text.Encoding               as T
+import           Data.X509.CertificateStore       (CertificateStore)
+import qualified Network.DNS                      as DNS
+import           Network.Socket                   (HostName, ServiceName, SockAddr, Socket)
+import qualified Network.Socket                   as Socket hiding (recv, sendAll)
+import qualified Network.Socket.ByteString        as Socket (recv, sendAll)
+import qualified Network.TLS                      as TLS
+import qualified Network.TLS.Extra.Cipher         as TLS
+import qualified Network.TLS.Extra.FFDHE          as TLS
+import           System.IO.Unsafe                 (unsafePerformIO)
+import           System.Random.Shuffle            (shuffleM)
+import           System.Timeout                   (timeout)
+import           System.X509                      (getSystemCertificateStore)
 
 data Connection = Connection
     { connBackend    :: MVar Backend
@@ -82,34 +80,34 @@ data Connection = Connection
 data Backend = ConnectionSocket Socket
              | ConnectionTLS TLS.Context
 
-fromSocket :: MonadIO m => Socket -> m Connection
+fromSocket :: Socket -> IO Connection
 fromSocket sock =
     Connection <$> newMVar (ConnectionSocket sock)
                <*> newMVar ""
 
-rawRecv :: MonadUnliftIO m => MVar Backend -> m ByteString
+rawRecv :: MVar Backend -> IO ByteString
 rawRecv backend = do
-    chunk <- liftIO $ withMVar backend $ \case
+    chunk <- withMVar backend $ \case
         ConnectionSocket sock -> Socket.recv sock 4096
         ConnectionTLS ctx     -> TLS.recvData ctx
-    when (B.null chunk) $ throwIO PeerConnectionClosed
+    when (B.null chunk) $ throw PeerConnectionClosed
     return chunk
 
-rawSend :: MonadUnliftIO m => MVar Backend -> ByteString -> m ()
+rawSend :: MVar Backend -> ByteString -> IO ()
 rawSend _ "" = return ()
 rawSend backend chunk =
-    liftIO $ withMVar backend $ \case
+    withMVar backend $ \case
         ConnectionSocket sock -> Socket.sendAll sock chunk
         ConnectionTLS ctx     -> TLS.sendData ctx $ LB.fromStrict chunk
 
-rawClose :: MonadUnliftIO m => MVar Backend -> m ()
+rawClose :: MVar Backend -> IO ()
 rawClose backend =
-    liftIO $ withMVar backend $ \case
+    withMVar backend $ \case
         ConnectionSocket sock -> Socket.close sock
         ConnectionTLS ctx     -> TLS.bye ctx >> TLS.contextClose ctx
 
-dialTimeout :: MonadUnliftIO m => m a -> m a
-dialTimeout f = timeout 3000000 f >>= maybe (throwIO ConnectionTimeout) return
+dialTimeout :: IO a -> IO a
+dialTimeout f = timeout 3000000 f >>= maybe (throw ConnectionTimeout) return
 
 -- | Open a new connection
 connect :: (HostName, ServiceName) -> (HostName, ServiceName) -> IO Connection
@@ -157,7 +155,7 @@ accept Connection{..} =
             fail "accept requires a socket backend"
 
 -- | Close a connection
-close :: MonadUnliftIO m => Connection -> m ()
+close :: Connection -> IO ()
 close Connection{..} = rawClose connBackend
 
 resolvSeed :: DNS.ResolvSeed
@@ -168,8 +166,8 @@ lookupMX :: HostName -> IO [(HostName, Int)]
 lookupMX domain =
     DNS.withResolver resolvSeed $ \resolver ->
         DNS.lookupMX resolver (DNS.normalize $ C.pack domain) >>= \case
-            Left e           -> throwIO e
-            Right [(".", _)] -> throwIO NullMX
+            Left e           -> throw e
+            Right [(".", _)] -> throw NullMX
             Right []         -> return [(domain, 0)] -- implicit MX
             Right rs         -> return $ map (first C.unpack) rs
 
@@ -190,28 +188,28 @@ connectMX lhost domain = do
             return conn
 
 -- | Upgrade a plain socket to a TLS connection
-secure :: (MonadUnliftIO m, TLS.TLSParams params) => Connection -> params -> m ()
+secure :: TLS.TLSParams params => Connection -> params -> IO ()
 secure Connection{..} params =
     modifyMVar_ connBackend $ \case
         ConnectionSocket sock -> do
-            ctx <- liftIO $ TLS.contextNew sock params
-            liftIO $ TLS.handshake ctx
+            ctx <- TLS.contextNew sock params
+            TLS.handshake ctx
             return $ ConnectionTLS ctx
         ConnectionTLS ctx ->
             return $ ConnectionTLS ctx
 
 -- | Is this a TLS connection?
-isSecure :: MonadUnliftIO m => Connection -> m Bool
+isSecure :: Connection -> IO Bool
 isSecure Connection{..} =
     withMVar connBackend $ \case
         ConnectionTLS _ -> return True
         _               -> return False
 
 -- | Get detailed TLS information for TLS connections
-tlsInfo :: MonadUnliftIO m => Connection -> m (Maybe TLS.Information)
+tlsInfo :: Connection -> IO (Maybe TLS.Information)
 tlsInfo Connection{..} =
     withMVar connBackend $ \case
-        ConnectionTLS ctx -> liftIO $ TLS.contextGetInformation ctx
+        ConnectionTLS ctx -> TLS.contextGetInformation ctx
         _                 -> return Nothing
 
 systemCertificateStore :: CertificateStore
@@ -251,25 +249,25 @@ tlsServerParams cred =
         }
 
 -- | Send a bytestring over a connection
-send :: MonadUnliftIO m => Connection -> LB.ByteString -> m ()
+send :: Connection -> LB.ByteString -> IO ()
 send Connection{..} = mapM_ (rawSend connBackend) . LB.toChunks
 
 -- | Send a single line appending the newline
-sendLine :: MonadUnliftIO m => Connection -> ByteString -> m ()
+sendLine :: Connection -> ByteString -> IO ()
 sendLine conn = send conn . LB.fromStrict . (`C.snoc` '\n')
 
 -- | Send a set of lines
-sendLines :: MonadUnliftIO m => Connection -> [ByteString] -> m ()
+sendLines :: Connection -> [ByteString] -> IO ()
 sendLines conn = send conn . LB.fromStrict . C.unlines
 
 -- | Receive a bytestring over a connection and put the unused portion back on the buffer
-recv :: MonadUnliftIO m => Connection -> (ByteString -> m (ByteString, a)) -> m a
+recv :: Connection -> (ByteString -> IO (ByteString, a)) -> IO a
 recv Connection{..} f =
     modifyMVar connRecvBuffer $ \buffer ->
         if B.null buffer then rawRecv connBackend >>= f else f buffer
 
 -- | Receive the next line minus the newline
-recvLine :: (MonadUnliftIO m, MonadFail m) => Connection -> m ByteString
+recvLine :: Connection -> IO ByteString
 recvLine conn = recvLoop ""
   where
     recvLoop acc = join $ recv conn $ \chunk ->
@@ -279,7 +277,7 @@ recvLine conn = recvLoop ""
             else return (B.drop 1 chunk', return acc')
 
 -- | Receive the next set of full lines
-recvLines :: (MonadUnliftIO m, MonadFail m) => Connection -> m [ByteString]
+recvLines :: Connection -> IO [ByteString]
 recvLines conn = C.lines <$> recvLoop ""
   where
     recvLoop acc = join $ recv conn $ \chunk ->
@@ -289,25 +287,25 @@ recvLines conn = C.lines <$> recvLoop ""
             else return ("", recvLoop acc')
 
 -- | Receive a message minus the data termination sequence
-recvData :: (MonadUnliftIO m, MonadFail m) => Connection -> m LB.ByteString
+recvData :: Connection -> IO LB.ByteString
 recvData conn = BB.toLazyByteString . mconcat . map (\l -> BB.byteString l <> "\n") <$> unfoldWhileM (\l -> l /= "." && l /= ".\r") (recvLine conn)
 
 -- | Receive a tuple of a bytestring and a parsed object it corresponds to
-recvParsed :: (MonadUnliftIO m, MonadFail m) => Connection -> AP.Parser a -> m (ByteString, a)
+recvParsed :: Connection -> AP.Parser a -> IO (ByteString, a)
 recvParsed conn parser = recvLoop "" $ AP.parse parser
   where
     recvLoop acc parser = do
         join $ recv conn $ \chunk ->
             case parser chunk of
-                AP.Fail i [] err   -> return (i, fail $ "recv: " ++ err)
-                AP.Fail i ctxs err -> return (i, fail $ "recv: " ++ intercalate " > " ctxs ++ ": " ++ err)
+                AP.Fail i [] err   -> return (i, fail $ "parse error: " ++ err)
+                AP.Fail i ctxs err -> return (i, fail $ "parse error: " ++ intercalate " > " ctxs ++ ": " ++ err)
                 AP.Done i a        -> return (i, return (acc <> B.take (B.length chunk - B.length i) chunk, a))
                 AP.Partial parser' -> return ("", recvLoop (acc <> chunk) parser')
 
 type Reply = (Int, [Text])
 
 -- | Receive a tuple of a bytestring and matching reply
-recvReply :: (MonadUnliftIO m, MonadFail m) => Connection -> m (ByteString, Reply)
+recvReply :: Connection -> IO (ByteString, Reply)
 recvReply conn = recvParsed conn pReply
   where
     pReply =

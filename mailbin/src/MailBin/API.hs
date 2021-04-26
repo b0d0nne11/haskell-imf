@@ -3,37 +3,38 @@
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE TemplateHaskell   #-}
 
 module MailBin.API
   ( runAPI
   )
 where
 
-import           Control.Concurrent                   (forkIO, newEmptyMVar, putMVar, takeMVar)
-import           Control.Exception                    (throw)
+import           Control.Concurrent.Async             (async, wait)
+import           Control.Monad.IO.Class               (MonadIO, liftIO)
+import           Control.Monad.Logger                 (MonadLogger, logInfo)
 import           Data.Aeson                           (ToJSON (..), object, (.=))
-import           Data.Time.Clock                      (UTCTime)
 import qualified Data.IMF                             as IMF
 import qualified Data.IMF.Parsers                     as IMF
 import           Data.Pool                            (Pool)
 import qualified Data.Text                            as T
+import           Data.Time.Clock                      (UTCTime)
 import qualified Database.SQLite.Simple               as DB
 import           Network.HTTP.Media                   ((//), (/:))
 import           Network.Simple.TCP                   (HostPreference, ServiceName, bindSock,
                                                        closeSock, listenSock)
 import           Network.Wai.Handler.Warp             (defaultSettings, runSettingsSocket)
 import           Network.Wai.Middleware.RequestLogger (logStdout)
-import           Servant
-import           System.Log.FastLogger                (FastLogger, toLogStr)
+import Servant
 
 import           MailBin.Config
 import           MailBin.DB
 
 or404 :: Handler (Maybe a) -> Handler a
-or404 f = f >>= maybe (throwError $ err404 { errBody = "Not found" }) return
+or404 f = f >>= maybe (throwError $ err404 { errBody = "not found" }) return
 
 instance FromHttpApiData IMF.Mailbox where
-    parseQueryParam = fmap (either (const $ throw $ err400 { errBody = "Invalid mailbox" }) id . IMF.parse) . parseQueryParam
+    parseQueryParam param = parseQueryParam param >>= either (const $ Left "invalid address") Right . IMF.parse
 
 instance FromHttpApiData a => FromHttpApiData (Comparison a) where
     parseQueryParam t = case T.splitOn ":" t of
@@ -46,7 +47,7 @@ instance FromHttpApiData a => FromHttpApiData (Comparison a) where
         ["neq", t1]    -> NotEqual <$> parseQueryParam t1
         ["b", t1, t2]  -> Between <$> parseQueryParam t1 <*> parseQueryParam t2
         ["nb", t1, t2] -> NotBetween <$> parseQueryParam t1 <*> parseQueryParam t2
-        _              -> throw $ err400 { errBody = "Invalid comparison" }
+        _              -> Left "invalid comparison"
 
 instance FromHttpApiData Limit where
     parseQueryParam = fmap Limit . parseQueryParam
@@ -110,17 +111,15 @@ loadConfigParams config =
     ConfigParams <$> lookupDefault "127.0.0.1" config "host"
                  <*> lookupDefault "3000" config "port"
 
-runAPI :: Config -> FastLogger -> Pool DB.Connection -> IO (IO ())
-runAPI config logger dbPool = do
-    ConfigParams{..} <- loadConfigParams config
-    (sock, addr) <- bindSock configHost configPort
-    listenSock sock 2048
-    logger $ "starting api @ http://" <> toLogStr (show addr) <> "\n"
-    done <- newEmptyMVar
-    forkIO $ do
+runAPI :: (MonadIO m, MonadLogger m) => Config -> Pool DB.Connection -> m (m ())
+runAPI config dbPool = do
+    ConfigParams{..} <- liftIO $ loadConfigParams config
+    $(logInfo) $ "starting api @ http://" <> T.pack (show configHost) <> ":" <> T.pack configPort
+    (sock, addr) <- liftIO $ bindSock configHost configPort
+    liftIO $ listenSock sock 2048
+    t <- liftIO $ async $
         runSettingsSocket defaultSettings sock $ logStdout $ app dbPool
-        logger "stopped api\n"
-        putMVar done ()
     return $ do
-        closeSock sock
-        takeMVar done
+        liftIO $ closeSock sock
+        liftIO $ wait t
+        $(logInfo) "stopped api"

@@ -24,21 +24,20 @@ library
                      , imf
                      , imf-parsers
                      , attoparsec
+                     , base64
+                     , bytestring
                      , data-default-class
                      , dns
-                     , base64-bytestring
-                     , bytestring
-                     , fast-logger
+                     , monad-logger
                      , monad-loops
                      , MonadRandom
                      , mtl
                      , network
                      , random-shuffle
+                     , safe-exceptions
                      , text
                      , time
                      , tls
-                     , unliftio-core
-                     , unliftio
                      , x509-system
                      , x509-store
   ghc-options:
@@ -54,16 +53,16 @@ test-suite imf-network-test
                      , imf
                      , imf-parsers
                      , imf-network
-                     , attoparsec
                      , bytestring
-                     , fast-logger
+                     , monad-logger
+                     , monad-loops
                      , mtl
+                     , safe-exceptions
+                     , stm
                      , tasty
                      , tasty-hunit
                      , text
                      , tls
-                     , unliftio-core
-                     , unliftio
   ghc-options:
   default-language:    Haskell2010
 

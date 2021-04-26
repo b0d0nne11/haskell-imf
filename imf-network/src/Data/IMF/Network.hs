@@ -10,7 +10,7 @@ module Data.IMF.Network
   , Server(..)
   , PassFail(..)
   , newServer
-  , runServer
+  , run
     -- * Connections
   , connect
   , connectMX

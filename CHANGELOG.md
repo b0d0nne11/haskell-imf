@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Bump the minimum base version to 4.13 (ghc version 8.8)
 - Bump the minimum base version again to 4.14 (ghc version 8.10)
 - Refactored connection interface to simplify and reduce blocking
+- Switch to monad-logger and safe-exceptions
+- No longer require a concrete monad stack for client and server
 
 ## [0.7.0] - 2020-07-19
 ### Added

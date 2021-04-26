@@ -22,13 +22,15 @@ module MailBin.DB
 where
 
 import           Control.Monad.IO.Class           (MonadIO, liftIO)
+import           Control.Monad.Logger             (MonadLogger)
 import           Data.ByteString.Lazy             (ByteString)
 import qualified Data.IMF                         as IMF
 import qualified Data.IMF.Parsers                 as IMF
 import           Data.List                        (intersperse)
 import           Data.Maybe                       (catMaybes)
-import           Data.Pool                        (Pool, createPool, withResource, destroyAllResources)
-import           Data.Time.Clock                  (UTCTime, NominalDiffTime)
+import           Data.Pool                        (Pool, createPool, destroyAllResources,
+                                                   withResource)
+import           Data.Time.Clock                  (NominalDiffTime, UTCTime)
 import qualified Database.SQLite.Simple           as DB
 import qualified Database.SQLite.Simple.FromField as DB
 import           Database.SQLite.Simple.QQ
@@ -75,15 +77,15 @@ loadSchema pool = withResource pool $ \conn -> do
         )
     |]
 
-setupDB :: Config -> IO (Pool DB.Connection)
+setupDB :: (MonadIO m, MonadLogger m) => Config -> m (Pool DB.Connection)
 setupDB config = do
-    ConfigParams{..} <- loadConfigParams config
-    pool <- createPool (DB.open configFile) DB.close 1 configIdleTimeout configMaxConns
-    loadSchema pool
+    ConfigParams{..} <- liftIO $ loadConfigParams config
+    pool <- liftIO $ createPool (DB.open configFile) DB.close 1 configIdleTimeout configMaxConns
+    liftIO $ loadSchema pool
     return pool
 
-closeDB :: Pool DB.Connection -> IO ()
-closeDB = destroyAllResources
+closeDB :: (MonadIO m, MonadLogger m) => Pool DB.Connection -> m ()
+closeDB = liftIO . destroyAllResources
 
 data Message = Message
     { messageId        :: Integer
